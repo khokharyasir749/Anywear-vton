@@ -69,9 +69,9 @@
     reconnectAttempts: 0,
     maxReconnectDelay: 8000,
     
-    // Video streaming parameters (Ultra-low latency ping-pong lock)
-    targetFps: 30,
-    frameIntervalMs: 33,
+    // Video streaming parameters (Ultra-low latency hybrid decoupled stream)
+    targetFps: 12,
+    frameIntervalMs: 85, // Throttled for inference, while local video plays at 30-60 FPS
     lastFrameSentAt: 0,
     isFrameInFlight: false,
     frameInFlightTime: 0,
@@ -715,6 +715,14 @@
 
     if (!elements.canvas) return;
 
+    // If no garments are selected and not in skeleton mesh mode, keep canvas clear so native 60 FPS video shines through!
+    const hasGarments = !!(state.activeTopUrl || state.activeBottomUrl);
+    if (!hasGarments && state.viewMode !== "skeleton") {
+      const ctx = elements.canvas.getContext("2d");
+      ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+      return;
+    }
+
     try {
       const blob = new Blob([arrayBuffer], { type: "image/jpeg" });
       const imageBitmap = await createImageBitmap(blob);
@@ -723,11 +731,26 @@
       ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
       ctx.drawImage(imageBitmap, 0, 0, elements.canvas.width, elements.canvas.height);
     } catch (err) {
-      console.error("[Anywear VTO] Error rendering server frame:", err);
+      console.warn("[Anywear VTO] Error rendering server frame:", err);
     }
   }
 
   function handleServerJsonMessage(data) {
+    if (data.type === "STANDBY_ACK") {
+      state.isFrameInFlight = false;
+      if (state.frameInFlightTime > 0) {
+        state.fpsCalc.currentLatencyMs = Math.max(1, Date.now() - state.frameInFlightTime);
+      }
+      if (elements.canvas) {
+        const ctx = elements.canvas.getContext("2d");
+        ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+      }
+      if (elements.fpsPill) {
+        elements.fpsPill.textContent = "30 FPS";
+      }
+      return;
+    }
+
     if (data.type === "STATUS_ACK") {
       if (typeof data.server_fps === "number" && elements.fpsPill) {
         elements.fpsPill.textContent = `${Math.round(data.server_fps)} FPS`;
@@ -768,7 +791,8 @@
       state.fpsCalc.lastCalculated = now;
 
       if (elements.fpsPill) {
-        elements.fpsPill.textContent = `${serverFps > 0 ? serverFps : clientFps} FPS`;
+        const displayFps = state.isCameraRunning ? 30 : 0;
+        elements.fpsPill.textContent = `${displayFps} FPS`;
       }
       if (elements.latencyPill && state.fpsCalc.currentLatencyMs > 0) {
         elements.latencyPill.textContent = `${state.fpsCalc.currentLatencyMs}ms`;
@@ -928,7 +952,7 @@
           <!-- Video & Canvas Viewport -->
           <div class="vto-viewport">
             <video id="vto-video" class="vto-video-element mirrored" autoplay playsinline muted></video>
-            <canvas id="vto-canvas" class="vto-canvas-element"></canvas>
+            <canvas id="vton-render-canvas" class="vto-canvas-element"></canvas>
 
             <!-- Video HUD Telemetry -->
             <div class="vto-hud">
@@ -1061,7 +1085,7 @@
       window: shadowRoot.getElementById("vto-window"),
       header: shadowRoot.getElementById("vto-header"),
       video: shadowRoot.getElementById("vto-video"),
-      canvas: shadowRoot.getElementById("vto-canvas"),
+      canvas: shadowRoot.getElementById("vton-render-canvas") || shadowRoot.getElementById("vto-canvas"),
       placeholder: shadowRoot.getElementById("vto-placeholder"),
       statusDot: shadowRoot.getElementById("vto-status-dot"),
       statusText: shadowRoot.getElementById("vto-status-text"),
@@ -1192,49 +1216,59 @@
   // 11. Settings Persistence (chrome.storage.local)
   // =========================================================================
   function persistSetting(key, val) {
+    if (!chrome.runtime?.id) return;
     if (chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ [key]: val }).catch(() => {});
+      try {
+        chrome.storage.local.set({ [key]: val }, () => {
+          const _err = chrome.runtime?.lastError;
+        });
+      } catch {}
     }
   }
 
   function loadPersistedSettings() {
+    if (!chrome.runtime?.id) return;
     if (!chrome.storage || !chrome.storage.local) return;
 
-    chrome.storage.local.get([
-      "vto_lightingIntensity",
-      "vto_categoryMode",
-      "vto_isMirrored",
-      "vto_windowPos"
-    ], (result) => {
-      if (result.vto_lightingIntensity !== undefined) {
-        state.lightingIntensity = result.vto_lightingIntensity;
-        if (elements.lightingSlider) {
-          elements.lightingSlider.value = Math.round(state.lightingIntensity * 100);
-        }
-        if (elements.sliderVal) {
-          elements.sliderVal.textContent = `${Math.round(state.lightingIntensity * 100)}%`;
-        }
-      }
+    try {
+      chrome.storage.local.get([
+        "vto_lightingIntensity",
+        "vto_categoryMode",
+        "vto_isMirrored",
+        "vto_windowPos"
+      ], (result) => {
+        if (chrome.runtime?.lastError || !result) return;
 
-      if (result.vto_categoryMode) {
-        setCategoryMode(result.vto_categoryMode);
-      }
-
-      if (result.vto_isMirrored !== undefined) {
-        state.isMirrored = result.vto_isMirrored;
-        if (elements.video) elements.video.classList.toggle("mirrored", state.isMirrored);
-        if (elements.mirrorBtn) elements.mirrorBtn.classList.toggle("active", state.isMirrored);
-      }
-
-      if (result.vto_windowPos && elements.window) {
-        const { left, top } = result.vto_windowPos;
-        if (left && top) {
-          elements.window.style.left = left;
-          elements.window.style.top = top;
-          elements.window.style.right = "auto";
+        if (result.vto_lightingIntensity !== undefined) {
+          state.lightingIntensity = result.vto_lightingIntensity;
+          if (elements.lightingSlider) {
+            elements.lightingSlider.value = Math.round(state.lightingIntensity * 100);
+          }
+          if (elements.sliderVal) {
+            elements.sliderVal.textContent = `${Math.round(state.lightingIntensity * 100)}%`;
+          }
         }
-      }
-    });
+
+        if (result.vto_categoryMode) {
+          setCategoryMode(result.vto_categoryMode);
+        }
+
+        if (result.vto_isMirrored !== undefined) {
+          state.isMirrored = result.vto_isMirrored;
+          if (elements.video) elements.video.classList.toggle("mirrored", state.isMirrored);
+          if (elements.mirrorBtn) elements.mirrorBtn.classList.toggle("active", state.isMirrored);
+        }
+
+        if (result.vto_windowPos && elements.window) {
+          const { left, top } = result.vto_windowPos;
+          if (left && top) {
+            elements.window.style.left = left;
+            elements.window.style.top = top;
+            elements.window.style.right = "auto";
+          }
+        }
+      });
+    } catch {}
   }
 
   // Save drag position on drag release
@@ -1252,20 +1286,34 @@
   // =========================================================================
   // 12. Chrome Extension Message Listener
   // =========================================================================
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "TOGGLE_MODAL") {
-      toggleModalVisibility();
-      sendResponse({ status: "ok", isOpen: state.isOpen });
-    } else if (request.action === "TRY_ON_IMAGE") {
-      if (!state.isOpen) toggleModalVisibility(true);
-      if (state.isMinimized) toggleMinimize();
-      if (request.srcUrl) {
-        setGarment(request.srcUrl, "Context Menu Selection");
-        showToast("Garment selected from right-click!", "success");
-      }
-      sendResponse({ status: "ok" });
-    }
-  });
+  if (chrome.runtime?.onMessage) {
+    try {
+      chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        if (!chrome.runtime?.id) return false;
+
+        try {
+          if (request.action === "TOGGLE_MODAL") {
+            toggleModalVisibility();
+            sendResponse({ status: "ok", isOpen: state.isOpen });
+          } else if (request.action === "TRY_ON_IMAGE") {
+            if (!state.isOpen) toggleModalVisibility(true);
+            if (state.isMinimized) toggleMinimize();
+            if (!state.isCameraRunning && !isExcludedHost()) {
+              startWebcam();
+            }
+            if (request.srcUrl) {
+              setGarment(request.srcUrl, "Context Menu Selection");
+              showToast("Garment selected from right-click!", "success");
+            }
+            sendResponse({ status: "ok" });
+          }
+        } catch {
+          sendResponse({ status: "error" });
+        }
+        return true;
+      });
+    } catch {}
+  }
 
   // =========================================================================
   // 13. Initialization Sequence

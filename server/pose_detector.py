@@ -6,6 +6,7 @@ Moving Average (EMA) smoothing, body orientation calculation, and key landmark e
 """
 
 import math
+import time
 import logging
 import os
 import urllib.request
@@ -162,6 +163,10 @@ class PoseDetector:
         if frame is None or self.landmarker is None:
             return PoseData(detected=False)
 
+        now = time.time()
+        if hasattr(self, "_last_detect_time") and (now - self._last_detect_time < 0.035) and hasattr(self, "_last_pose_result"):
+            return self._last_pose_result
+
         h, w = frame.shape[:2]
 
         try:
@@ -264,7 +269,7 @@ class PoseDetector:
 
             z_diff = getattr(l_sh_raw, 'z', 0.0) - getattr(r_sh_raw, 'z', 0.0)
 
-            return PoseData(
+            result_data = PoseData(
                 detected=True,
                 confidence=float(avg_vis),
                 landmarks=smoothed,
@@ -290,6 +295,9 @@ class PoseDetector:
                 scale_factor=scale_factor,
                 yaw_ratio=float(z_diff)
             )
+            self._last_detect_time = now
+            self._last_pose_result = result_data
+            return result_data
 
         except Exception as e:
             logger.error("Pose detection error: %s", e)

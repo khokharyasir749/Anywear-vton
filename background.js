@@ -97,30 +97,38 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 /**
  * Safely sends message to tab, injecting scripts if tab was loaded before extension
  */
-async function ensureAndSendMessage(tabId, message) {
+function ensureAndSendMessage(tabId, message) {
+  if (!chrome.runtime?.id) return;
+
   try {
-    await chrome.tabs.sendMessage(tabId, message);
-  } catch (err) {
-    console.log("[Anywear VTO] Injecting content script dynamically to deliver message...", err);
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        files: ["content.js"]
-      });
-      await chrome.scripting.insertCSS({
-        target: { tabId },
-        files: ["content.css"]
-      });
-      // Retry sending message after brief yield
-      setTimeout(async () => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      // Always inspect lastError to prevent Chrome from flagging an uncaught rejection
+      const err = chrome.runtime.lastError;
+      if (err) {
+        // Tab does not have content script yet, inject dynamically and deliver
         try {
-          await chrome.tabs.sendMessage(tabId, message);
-        } catch (retryErr) {
-          console.warn("[Anywear VTO] Could not deliver message after dynamic injection:", retryErr);
+          chrome.scripting.executeScript({
+            target: { tabId },
+            files: ["content.js"]
+          }, () => {
+            if (chrome.runtime?.lastError) return;
+            chrome.scripting.insertCSS({
+              target: { tabId },
+              files: ["content.css"]
+            }, () => {
+              if (chrome.runtime?.lastError) return;
+              chrome.tabs.sendMessage(tabId, message, () => {
+                // Consume lastError to avoid uncaught exception badge
+                const _ignored = chrome.runtime?.lastError;
+              });
+            });
+          });
+        } catch {
+          // Tab closed or protected
         }
-      }, 100);
-    } catch (injectErr) {
-      console.error("[Anywear VTO] Failed dynamic script injection:", injectErr);
-    }
+      }
+    });
+  } catch {
+    // Context invalidated or tab closed
   }
 }

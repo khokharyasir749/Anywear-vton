@@ -225,14 +225,22 @@ body.anywear-picker-active * {
   border-radius: 12px;
 }
 
+.vto-video-element {
+  z-index: 1;
+  display: block;
+  opacity: 1;
+}
+
 .vto-video-element.mirrored {
   transform: scaleX(-1);
 }
 
 .vto-canvas-element {
+  z-index: 2;
   pointer-events: none;
+  background: transparent;
   opacity: 1;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.15s ease;
 }
 
 .vto-canvas-element.hidden {

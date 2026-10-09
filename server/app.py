@@ -115,12 +115,20 @@ def process_video_frame_sync(
         h, w = frame.shape[:2]
         session.update_fps()
 
-        # 1. Pose Landmark Estimation
+        has_garments = (session.active_top is not None or session.active_bottom is not None)
+
+        # 1. When NO garments are active and not in skeleton mode:
+        # SKIP heavy depth shading, warping, and full image processing!
+        # Returning None allows the client local webcam to play at fluid 30-60 FPS natively with 0ms latency.
+        if not has_garments and session.view_mode != "skeleton":
+            return None
+
+        # 2. Pose Landmark Estimation
         pose = session.pose_detector.detect(frame)
         session.last_pose_detected = pose.detected
 
-        # 2. Render Virtual Try-On Garments (Top and/or Bottom)
-        if session.view_mode == "ai" and pose.detected and (session.active_top or session.active_bottom):
+        # 3. Render Virtual Try-On Garments (Top and/or Bottom)
+        if session.view_mode == "ai" and pose.detected and has_garments:
             frame = session.vton_engine.render(
                 frame=frame,
                 pose=pose,
@@ -132,11 +140,14 @@ def process_video_frame_sync(
         elif session.view_mode == "skeleton" and pose.detected:
             frame = session.pose_detector.draw_skeleton(frame, pose)
 
-        # 3. Telemetry HUD Overlay
+        # 4. Telemetry HUD Overlay
         frame = draw_hud(frame, session, pose)
 
-        # 4. Fast JPEG Re-encoding (Quality 70 for instantaneous binary serialization)
-        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+        # 5. Ultra-fast JPEG Re-encoding (low compression overhead, skip 2-pass Huffman tree)
+        encode_params = [
+            int(cv2.IMWRITE_JPEG_QUALITY), 65,
+            int(cv2.IMWRITE_JPEG_OPTIMIZE), 0
+        ]
         success, encoded_jpg = cv2.imencode(".jpg", frame, encode_params)
         if success:
             return encoded_jpg.tobytes()
@@ -272,6 +283,13 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 if encoded_bytes:
                     await websocket.send_bytes(encoded_bytes)
                     session.frames_sent += 1
+                else:
+                    # Lightweight standby ACK so in-flight lock opens and telemetry updates
+                    await websocket.send_text(json.dumps({
+                        "type": "STANDBY_ACK",
+                        "server_fps": round(session.fps, 1),
+                        "pose_detected": session.last_pose_detected
+                    }))
             except asyncio.CancelledError:
                 break
             except Exception as e:
