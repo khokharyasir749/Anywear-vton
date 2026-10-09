@@ -300,6 +300,8 @@ async def websocket_stream_endpoint(websocket: WebSocket):
     try:
         while True:
             msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
 
             if "bytes" in msg and msg["bytes"]:
                 raw_bytes = msg["bytes"]

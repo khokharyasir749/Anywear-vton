@@ -69,26 +69,58 @@ class VTONEngine:
         self.body_parser = BodyParser()
         self.physics = FabricPhysics()
 
-        # Mesh Triangulation Topology for TOPS
+        # Comprehensive Delaunay Triangular Mesh Topology for TOPS (18 Triangles)
         self.top_triangles = [
-            ("collar_center", "left_shoulder", "chest_center"),
-            ("collar_center", "right_shoulder", "chest_center"),
-            ("left_shoulder", "left_mid", "chest_center"),
-            ("right_shoulder", "right_mid", "chest_center"),
-            ("left_mid", "left_hem", "waist_center"),
-            ("left_mid", "waist_center", "chest_center"),
-            ("right_mid", "right_hem", "waist_center"),
-            ("right_mid", "chest_center", "waist_center"),
+            # Collar & Neckline
+            ("collar_center", "collar_left", "chest_center"),
+            ("collar_center", "collar_right", "chest_center"),
+            ("collar_left", "left_shoulder", "chest_center"),
+            ("collar_right", "right_shoulder", "chest_center"),
+
+            # Left Arm / Shoulder & Underarm
+            ("left_shoulder", "left_sleeve", "left_armpit"),
+            ("left_shoulder", "left_armpit", "chest_center"),
+
+            # Right Arm / Shoulder & Underarm
+            ("right_shoulder", "right_sleeve", "right_armpit"),
+            ("right_shoulder", "right_armpit", "chest_center"),
+
+            # Torso & Ribs
+            ("left_armpit", "left_rib", "chest_center"),
+            ("right_armpit", "right_rib", "chest_center"),
+            ("left_rib", "waist_center", "chest_center"),
+            ("right_rib", "waist_center", "chest_center"),
+
+            # Beltline & Waist
+            ("left_rib", "left_waist", "waist_center"),
+            ("right_rib", "right_waist", "waist_center"),
+
+            # Lower Hem
+            ("left_waist", "left_hem", "hem_center"),
+            ("left_waist", "hem_center", "waist_center"),
+            ("right_waist", "right_hem", "hem_center"),
+            ("right_waist", "waist_center", "hem_center"),
         ]
 
-        # Mesh Triangulation Topology for BOTTOMS
+        # Comprehensive Delaunay Triangular Mesh Topology for BOTTOMS (12 Triangles)
         self.bottom_triangles = [
+            # Waistband & Pelvis
             ("waist_center", "left_waist", "crotch_center"),
             ("waist_center", "right_waist", "crotch_center"),
-            ("left_waist", "left_knee", "crotch_center"),
-            ("right_waist", "right_knee", "crotch_center"),
-            ("left_knee", "left_ankle", "crotch_center"),
-            ("right_knee", "right_ankle", "crotch_center"),
+            ("left_waist", "left_thigh_outer", "crotch_center"),
+            ("right_waist", "right_thigh_outer", "crotch_center"),
+
+            # Thigh to Knee
+            ("left_thigh_outer", "left_knee_outer", "crotch_center"),
+            ("crotch_center", "left_knee_outer", "left_knee"),
+            ("right_thigh_outer", "right_knee_outer", "crotch_center"),
+            ("crotch_center", "right_knee_outer", "right_knee"),
+
+            # Knee to Ankle / Hem
+            ("left_knee_outer", "left_ankle_outer", "left_knee"),
+            ("left_knee", "left_ankle_outer", "left_ankle"),
+            ("right_knee_outer", "right_ankle_outer", "right_knee"),
+            ("right_knee", "right_ankle_outer", "right_ankle"),
         ]
 
     def render(
@@ -165,12 +197,30 @@ class VTONEngine:
         if not dst_anchors:
             return canvas_frame
 
-        # 2. Piecewise Affine Mesh Warping
+        # 2. Piecewise Affine Mesh Warping across Delaunay topology
         warped_bgr, warped_alpha = self._warp_mesh(garment, dst_anchors, w, h)
         if np.max(warped_alpha) < 10:
             return canvas_frame
 
-        # 3. Constrain to Body Segmentation Mask (ensures Tops don't spill to legs, Bottoms don't spill to chest)
+        torso_len = max(1.0, math.hypot(pose.waist[0] - pose.neck[0], pose.waist[1] - pose.neck[1]))
+        sh_len = max(1.0, pose.shoulder_width)
+
+        # 3. Inner Collar Hollow & Skin Neckline Occlusion (No Floating Hangers)
+        if garment.category == "TOP" and "collar_center" in dst_anchors:
+            cc = dst_anchors["collar_center"]
+            throat_x = int(cc[0])
+            throat_y = int(cc[1] - torso_len * 0.03)
+            c_rx = int(max(10, sh_len * 0.14))
+            c_ry = int(max(8, torso_len * 0.08))
+
+            collar_cutout = np.zeros_like(warped_alpha)
+            cv2.ellipse(collar_cutout, (throat_x, throat_y), (c_rx, c_ry), 0, 0, 360, 255, -1)
+            collar_cutout = cv2.GaussianBlur(collar_cutout, (9, 9), 0)
+
+            # Punch out inner collar hole so user's natural throat and skin show through
+            warped_alpha = np.clip(warped_alpha.astype(np.int16) - collar_cutout.astype(np.int16), 0, 255).astype(np.uint8)
+
+        # 4. Constrain to Body Segmentation Mask (ensures Tops don't spill to legs, Bottoms don't spill to chest)
         if region_mask is not None:
             norm_region = region_mask.astype(np.float32) / 255.0
             warped_alpha = (warped_alpha.astype(np.float32) * norm_region).astype(np.uint8)
@@ -219,67 +269,123 @@ class VTONEngine:
         torso_len = max(1.0, math.hypot(waist[0] - neck[0], waist[1] - neck[1]))
 
         if garment.category == "TOP":
-            sleeve_margin = sh_len * 0.16
+            # 1. Throat / Suprasternal notch:
+            # Collar center snaps directly to base of neck / throat (above shoulder line towards chin)
+            throat_x = neck[0] - down_x * (torso_len * 0.08)
+            throat_y = neck[1] - down_y * (torso_len * 0.08)
+            dst["collar_center"] = (throat_x, throat_y)
 
+            # Neckline scoop corners
+            collar_notch_w = sh_len * 0.16
+            dst["collar_left"] = (
+                throat_x - u_sh_x * collar_notch_w - down_x * (torso_len * 0.02),
+                throat_y - u_sh_y * collar_notch_w - down_y * (torso_len * 0.02)
+            )
+            dst["collar_right"] = (
+                throat_x + u_sh_x * collar_notch_w - down_x * (torso_len * 0.02),
+                throat_y + u_sh_y * collar_notch_w - down_y * (torso_len * 0.02)
+            )
+
+            # 2. Shoulder seams: strictly snapped to anatomical landmarks 11 & 12
             dst["left_shoulder"] = (
-                l_sh[0] - u_sh_x * sleeve_margin,
-                l_sh[1] - u_sh_y * sleeve_margin - torso_len * 0.04
+                l_sh[0] - u_sh_x * (sh_len * 0.04) - down_x * (torso_len * 0.02),
+                l_sh[1] - u_sh_y * (sh_len * 0.04) - down_y * (torso_len * 0.02)
             )
             dst["right_shoulder"] = (
-                r_sh[0] + u_sh_x * sleeve_margin,
-                r_sh[1] + u_sh_y * sleeve_margin - torso_len * 0.04
+                r_sh[0] + u_sh_x * (sh_len * 0.04) - down_x * (torso_len * 0.02),
+                r_sh[1] + u_sh_y * (sh_len * 0.04) - down_y * (torso_len * 0.02)
             )
-            dst["collar_center"] = (
-                neck[0] + down_x * (torso_len * 0.05),
-                neck[1] + down_y * (torso_len * 0.05)
+
+            # 3. Sleeves & Armpits: follow user's upper arms
+            l_elbow = pose.left_elbow if pose.left_elbow[0] > 0 else (l_sh[0] - sh_len * 0.35, l_sh[1] + torso_len * 0.5)
+            r_elbow = pose.right_elbow if pose.right_elbow[0] > 0 else (r_sh[0] + sh_len * 0.35, r_sh[1] + torso_len * 0.5)
+
+            # Sleeve tips along arm vector
+            l_arm_dx = l_elbow[0] - l_sh[0]
+            l_arm_dy = l_elbow[1] - l_sh[1]
+            r_arm_dx = r_elbow[0] - r_sh[0]
+            r_arm_dy = r_elbow[1] - r_sh[1]
+
+            dst["left_sleeve"] = (
+                l_sh[0] + l_arm_dx * 0.55 - u_sh_x * (sh_len * 0.05),
+                l_sh[1] + l_arm_dy * 0.55
             )
+            dst["right_sleeve"] = (
+                r_sh[0] + r_arm_dx * 0.55 + u_sh_x * (sh_len * 0.05),
+                r_sh[1] + r_arm_dy * 0.55
+            )
+
+            # Underarm seams
+            dst["left_armpit"] = (
+                l_sh[0] + down_x * (torso_len * 0.28) - u_sh_x * (sh_len * 0.02),
+                l_sh[1] + down_y * (torso_len * 0.28) - u_sh_y * (sh_len * 0.02)
+            )
+            dst["right_armpit"] = (
+                r_sh[0] + down_x * (torso_len * 0.28) + u_sh_x * (sh_len * 0.02),
+                r_sh[1] + down_y * (torso_len * 0.28) + u_sh_y * (sh_len * 0.02)
+            )
+
+            # 4. Chest & Ribs
             dst["chest_center"] = (chest[0], chest[1])
+            rib_center = (
+                neck[0] + down_x * (torso_len * 0.58),
+                neck[1] + down_y * (torso_len * 0.58)
+            )
+            half_rib_w = sh_len * 0.48
+            dst["left_rib"] = (
+                rib_center[0] - u_sh_x * half_rib_w + drape_lag_x * 0.4,
+                rib_center[1] - u_sh_y * half_rib_w
+            )
+            dst["right_rib"] = (
+                rib_center[0] + u_sh_x * half_rib_w + drape_lag_x * 0.4,
+                rib_center[1] + u_sh_y * half_rib_w
+            )
+            dst["left_mid"] = dst["left_rib"]
+            dst["right_mid"] = dst["right_rib"]
 
-            # Mid-torso
-            mid_center = (
-                neck[0] + down_x * (torso_len * 0.55),
-                neck[1] + down_y * (torso_len * 0.55)
-            )
-            half_mid_w = (sh_len * 0.52)
-            dst["left_mid"] = (
-                mid_center[0] - u_sh_x * half_mid_w + drape_lag_x * 0.5,
-                mid_center[1] - u_sh_y * half_mid_w
-            )
-            dst["right_mid"] = (
-                mid_center[0] + u_sh_x * half_mid_w + drape_lag_x * 0.5,
-                mid_center[1] + u_sh_y * half_mid_w
-            )
+            # 5. Waist & Lower Hem (anchored to landmarks 23/24)
+            l_hip = pose.left_hip if pose.left_hip[0] > 0 else (waist[0] - sh_len * 0.40, waist[1])
+            r_hip = pose.right_hip if pose.right_hip[0] > 0 else (waist[0] + sh_len * 0.40, waist[1])
 
-            # Lower hem with micro-draping physics lag
+            dst["waist_center"] = (waist[0] + drape_lag_x * 0.7, waist[1])
+            dst["left_waist"] = (l_hip[0] - u_sh_x * (sh_len * 0.04) + drape_lag_x * 0.7, l_hip[1])
+            dst["right_waist"] = (r_hip[0] + u_sh_x * (sh_len * 0.04) + drape_lag_x * 0.7, r_hip[1])
+
             hem_center = (
-                neck[0] + down_x * (torso_len * 1.08),
-                neck[1] + down_y * (torso_len * 1.08)
+                waist[0] + down_x * (torso_len * 0.12) + drape_lag_x,
+                waist[1] + down_y * (torso_len * 0.12)
             )
-            half_hem_w = (sh_len * 0.56)
+            dst["hem_center"] = hem_center
             dst["left_hem"] = (
-                hem_center[0] - u_sh_x * half_hem_w + drape_lag_x,
-                hem_center[1] - u_sh_y * half_hem_w
+                dst["left_waist"][0] + down_x * (torso_len * 0.12) + drape_lag_x,
+                dst["left_waist"][1] + down_y * (torso_len * 0.12)
             )
             dst["right_hem"] = (
-                hem_center[0] + u_sh_x * half_hem_w + drape_lag_x,
-                hem_center[1] + u_sh_y * half_hem_w
+                dst["right_waist"][0] + down_x * (torso_len * 0.12) + drape_lag_x,
+                dst["right_waist"][1] + down_y * (torso_len * 0.12)
             )
-            dst["waist_center"] = (hem_center[0] + drape_lag_x, hem_center[1])
 
         else: # BOTTOM
             l_hip = pose.left_hip
             r_hip = pose.right_hip
             hip_len = max(1.0, math.hypot(r_hip[0] - l_hip[0], r_hip[1] - l_hip[1]))
 
-            dst["waist_center"] = (waist[0], waist[1] + torso_len * 0.04)
-            dst["left_waist"] = (l_hip[0] - u_sh_x * (hip_len * 0.15), l_hip[1] + torso_len * 0.04)
-            dst["right_waist"] = (r_hip[0] + u_sh_x * (hip_len * 0.15), r_hip[1] + torso_len * 0.04)
-            dst["crotch_center"] = (waist[0] + down_x * (hip_len * 0.52), waist[1] + down_y * (hip_len * 0.52))
+            dst["waist_center"] = (waist[0], waist[1] + torso_len * 0.02)
+            dst["left_waist"] = (l_hip[0] - u_sh_x * (hip_len * 0.12), l_hip[1] + torso_len * 0.02)
+            dst["right_waist"] = (r_hip[0] + u_sh_x * (hip_len * 0.12), r_hip[1] + torso_len * 0.02)
+            dst["crotch_center"] = (waist[0] + down_x * (hip_len * 0.48), waist[1] + down_y * (hip_len * 0.48))
+            dst["left_thigh_outer"] = (l_hip[0] - u_sh_x * (hip_len * 0.22) + down_x * (hip_len * 0.40), l_hip[1] + down_y * (hip_len * 0.40))
+            dst["right_thigh_outer"] = (r_hip[0] + u_sh_x * (hip_len * 0.22) + down_x * (hip_len * 0.40), r_hip[1] + down_y * (hip_len * 0.40))
 
-            dst["left_knee"] = (pose.left_knee[0] + drape_lag_x * 0.6, pose.left_knee[1])
-            dst["right_knee"] = (pose.right_knee[0] + drape_lag_x * 0.6, pose.right_knee[1])
+            dst["left_knee"] = (pose.left_knee[0] + drape_lag_x * 0.5, pose.left_knee[1])
+            dst["right_knee"] = (pose.right_knee[0] + drape_lag_x * 0.5, pose.right_knee[1])
+            dst["left_knee_outer"] = (pose.left_knee[0] - u_sh_x * (hip_len * 0.18) + drape_lag_x * 0.5, pose.left_knee[1])
+            dst["right_knee_outer"] = (pose.right_knee[0] + u_sh_x * (hip_len * 0.18) + drape_lag_x * 0.5, pose.right_knee[1])
+
             dst["left_ankle"] = (pose.left_ankle[0] + drape_lag_x, pose.left_ankle[1])
             dst["right_ankle"] = (pose.right_ankle[0] + drape_lag_x, pose.right_ankle[1])
+            dst["left_ankle_outer"] = (pose.left_ankle[0] - u_sh_x * (hip_len * 0.15) + drape_lag_x, pose.left_ankle[1])
+            dst["right_ankle_outer"] = (pose.right_ankle[0] + u_sh_x * (hip_len * 0.15) + drape_lag_x, pose.right_ankle[1])
 
         return dst
 
@@ -370,18 +476,31 @@ class VTONEngine:
         garment_bgr: np.ndarray,
         alpha: np.ndarray
     ) -> np.ndarray:
-        """Applies bilateral edge feathering and linear alpha compositing restricted to active ROI."""
+        """
+        Applies 5px to 9px Gaussian blur edge feathering along garment alpha borders
+        to eradicate hard sticker/cookie-cutter edges and ensure seamless skin/canvas transition.
+        """
         rx, ry, rw, rh = cv2.boundingRect(alpha)
         if rw <= 0 or rh <= 0:
             return canvas
 
-        alpha_crop = alpha[ry:ry + rh, rx:rx + rw]
-        feathered = cv2.GaussianBlur(alpha_crop, (5, 5), 0)
+        h, w = canvas.shape[:2]
+        # Pad ROI by 8px so Gaussian feathering has space to fade out naturally
+        pad = 8
+        x1 = max(0, rx - pad)
+        y1 = max(0, ry - pad)
+        x2 = min(w, rx + rw + pad)
+        y2 = min(h, ry + rh + pad)
+
+        alpha_crop = alpha[y1:y2, x1:x2]
+        
+        # 9px Gaussian edge feathering along garment alpha borders
+        feathered = cv2.GaussianBlur(alpha_crop, (9, 9), 2.5)
         norm_alpha = (feathered.astype(np.float32) / 255.0)[:, :, np.newaxis]
 
-        garment_crop = garment_bgr[ry:ry + rh, rx:rx + rw].astype(np.float32)
-        canvas_crop = canvas[ry:ry + rh, rx:rx + rw].astype(np.float32)
+        garment_crop = garment_bgr[y1:y2, x1:x2].astype(np.float32)
+        canvas_crop = canvas[y1:y2, x1:x2].astype(np.float32)
 
         blended = norm_alpha * garment_crop + (1.0 - norm_alpha) * canvas_crop
-        canvas[ry:ry + rh, rx:rx + rw] = np.clip(blended, 0, 255).astype(np.uint8)
+        canvas[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
         return canvas

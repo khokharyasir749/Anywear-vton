@@ -198,38 +198,62 @@ class GarmentProcessor:
     ) -> Dict[str, Tuple[float, float]]:
         """
         Extracts strategic geometric anchors on the 2D garment for warping.
+        Provides 16+ key anatomical anchor zones for Delaunay piecewise affine warping.
         """
         anchors = {}
 
         if category == "TOP":
-            # Upper anchors
-            anchors["collar_center"] = (float(gw * 0.50), float(gh * 0.08))
-            anchors["left_shoulder"] = (float(gw * 0.16), float(gh * 0.16))
-            anchors["right_shoulder"] = (float(gw * 0.84), float(gh * 0.16))
+            # 1. Neckline & Collar Anchors
+            anchors["collar_center"] = (float(gw * 0.50), float(gh * 0.07))
+            anchors["collar_left"] = (float(gw * 0.38), float(gh * 0.05))
+            anchors["collar_right"] = (float(gw * 0.62), float(gh * 0.05))
 
-            # Mid-torso anchors
-            anchors["chest_center"] = (float(gw * 0.50), float(gh * 0.40))
-            anchors["left_mid"] = (float(gw * 0.20), float(gh * 0.55))
-            anchors["right_mid"] = (float(gw * 0.80), float(gh * 0.55))
+            # 2. Shoulder Seams
+            anchors["left_shoulder"] = (float(gw * 0.20), float(gh * 0.13))
+            anchors["right_shoulder"] = (float(gw * 0.80), float(gh * 0.13))
 
-            # Lower hem anchors
-            anchors["left_hem"] = (float(gw * 0.22), float(gh * 0.94))
-            anchors["right_hem"] = (float(gw * 0.78), float(gh * 0.94))
-            anchors["waist_center"] = (float(gw * 0.50), float(gh * 0.96))
+            # 3. Outer Sleeves & Underarms
+            anchors["left_sleeve"] = (float(gw * 0.04), float(gh * 0.30))
+            anchors["right_sleeve"] = (float(gw * 0.96), float(gh * 0.30))
+            anchors["left_armpit"] = (float(gw * 0.23), float(gh * 0.38))
+            anchors["right_armpit"] = (float(gw * 0.77), float(gh * 0.38))
+
+            # 4. Chest & Ribs
+            anchors["chest_center"] = (float(gw * 0.50), float(gh * 0.36))
+            anchors["left_rib"] = (float(gw * 0.24), float(gh * 0.62))
+            anchors["right_rib"] = (float(gw * 0.76), float(gh * 0.62))
+            anchors["left_mid"] = anchors["left_rib"]
+            anchors["right_mid"] = anchors["right_rib"]
+
+            # 5. Waist & Bottom Hem
+            anchors["waist_center"] = (float(gw * 0.50), float(gh * 0.72))
+            anchors["left_waist"] = (float(gw * 0.23), float(gh * 0.86))
+            anchors["right_waist"] = (float(gw * 0.77), float(gh * 0.86))
+            anchors["left_hem"] = (float(gw * 0.22), float(gh * 0.96))
+            anchors["right_hem"] = (float(gw * 0.78), float(gh * 0.96))
+            anchors["hem_center"] = (float(gw * 0.50), float(gh * 0.97))
 
         else: # BOTTOM
-            # Waistband
+            # 1. Waistband
             anchors["waist_center"] = (float(gw * 0.50), float(gh * 0.06))
-            anchors["left_waist"] = (float(gw * 0.20), float(gh * 0.08))
-            anchors["right_waist"] = (float(gw * 0.80), float(gh * 0.08))
+            anchors["left_waist"] = (float(gw * 0.18), float(gh * 0.06))
+            anchors["right_waist"] = (float(gw * 0.82), float(gh * 0.06))
 
-            # Crotch & knees
-            anchors["crotch_center"] = (float(gw * 0.50), float(gh * 0.42))
+            # 2. Pelvis & Crotch
+            anchors["crotch_center"] = (float(gw * 0.50), float(gh * 0.38))
+            anchors["left_thigh_outer"] = (float(gw * 0.14), float(gh * 0.38))
+            anchors["right_thigh_outer"] = (float(gw * 0.86), float(gh * 0.38))
+
+            # 3. Knees
             anchors["left_knee"] = (float(gw * 0.30), float(gh * 0.68))
             anchors["right_knee"] = (float(gw * 0.70), float(gh * 0.68))
+            anchors["left_knee_outer"] = (float(gw * 0.16), float(gh * 0.68))
+            anchors["right_knee_outer"] = (float(gw * 0.84), float(gh * 0.68))
 
-            # Bottom hems
-            anchors["left_ankle"] = (float(gw * 0.26), float(gh * 0.95))
-            anchors["right_ankle"] = (float(gw * 0.74), float(gh * 0.95))
+            # 4. Ankles & Hem
+            anchors["left_ankle"] = (float(gw * 0.28), float(gh * 0.96))
+            anchors["right_ankle"] = (float(gw * 0.72), float(gh * 0.96))
+            anchors["left_ankle_outer"] = (float(gw * 0.18), float(gh * 0.96))
+            anchors["right_ankle_outer"] = (float(gw * 0.82), float(gh * 0.96))
 
         return anchors

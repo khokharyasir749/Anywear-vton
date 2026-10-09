@@ -57,31 +57,35 @@ class DepthShadingEngine:
         alpha_roi = warped_alpha[ry:ry + rh, rx:rx + rw]
         frame_roi = original_frame[ry:ry + rh, rx:rx + rw]
 
-        # 1. Extract Live Real-World Folds within ROI
+        # 1. Extract Live Real-World Folds & Wrinkles within ROI (Bidirectional float high-pass)
         gray_roi = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2GRAY)
-        low_pass = cv2.GaussianBlur(gray_roi, (11, 11), 0)
-        high_pass = cv2.subtract(gray_roi, low_pass)
-        fold_roi = cv2.add(cv2.multiply(high_pass, 1.5), 128)
-        fold_norm = fold_roi.astype(np.float32) / 255.0
+        low_pass = cv2.GaussianBlur(gray_roi, (17, 17), 0)
+        high_pass = gray_roi.astype(np.float32) - low_pass.astype(np.float32)
 
-        # 2. Fast Soft-Light Blending on ROI
-        cloth_norm = cloth_roi.astype(np.float32) / 255.0
+        # Normalized fold luminance centered at 0.5 (creases < 0.5, highlights > 0.5)
+        fold_norm = np.clip(0.5 + (high_pass / 128.0) * 0.85, 0.0, 1.0)
         fold_3ch = fold_norm[:, :, np.newaxis]
 
-        # Pegtop Soft-Light: (1 - 2*b)*a*a + 2*b*a
+        # 2. Pegtop Soft-Light Blending + Multiply Shadow Transfer
+        cloth_norm = cloth_roi.astype(np.float32) / 255.0
         cloth_sq = cloth_norm * cloth_norm
         soft_light_roi = (1.0 - 2.0 * fold_3ch) * cloth_sq + (2.0 * fold_3ch) * cloth_norm
-        soft_light_bgr = np.clip(soft_light_roi * 255.0, 0.0, 255.0)
 
-        # 3. Torso Curvature & Ambient Occlusion within ROI
+        # Selective shadow multiply for deep creases
+        multiply_shadow = cloth_norm * np.clip(fold_3ch * 1.15, 0.0, 1.0)
+        deep_crease = (fold_3ch < 0.44).astype(np.float32)
+        blended_folds = (1.0 - deep_crease * 0.45) * soft_light_roi + (deep_crease * 0.45) * multiply_shadow
+        blended_folds_bgr = np.clip(blended_folds * 255.0, 0.0, 255.0)
+
+        # 3. Torso 3D Cylindrical Curvature & Underarm Ambient Occlusion
         shading_roi = self._compute_roi_diffuse_and_ao(rx, ry, rw, rh, pose)
         shading_3ch = shading_roi[:, :, np.newaxis]
 
         # 4. Modulate Shading with user intensity
-        mix_factor = intensity * 0.60
-        shaded_roi = (1.0 - mix_factor) * cloth_roi.astype(np.float32) + mix_factor * soft_light_bgr
-        ao_factor = (1.0 - intensity * 0.35) + (intensity * 0.35) * shading_3ch
-        final_roi = np.clip(shaded_roi * ao_factor, 0.0, 255.0).astype(np.uint8)
+        mix_factor = float(np.clip(intensity * 0.72, 0.0, 1.0))
+        shaded_base = (1.0 - mix_factor) * cloth_roi.astype(np.float32) + mix_factor * blended_folds_bgr
+        ao_factor = (1.0 - intensity * 0.40) + (intensity * 0.40) * shading_3ch
+        final_roi = np.clip(shaded_base * ao_factor, 0.0, 255.0).astype(np.uint8)
 
         # Write back shaded ROI to output buffer
         result_bgr = warped_bgr.copy()
@@ -92,36 +96,42 @@ class DepthShadingEngine:
         self, rx: int, ry: int, rw: int, rh: int, pose: PoseData
     ) -> np.ndarray:
         """
-        Fast 1D cylindrical shading computation mapped onto ROI.
+        Torso 3D Cylindrical Gradient & Ambient Occlusion:
+        Darkens side edges and underarm seams using a radial cosine shadow map
+        to simulate realistic anatomical depth and curvature.
         """
         sh_cx = (pose.left_shoulder[0] + pose.right_shoulder[0]) * 0.5
-        sh_half_w = max(20.0, pose.shoulder_width * 0.52)
+        sh_half_w = max(20.0, pose.shoulder_width * 0.50)
 
         # Horizontal coordinates relative to torso center
         xs = np.linspace(rx - sh_cx, (rx + rw) - sh_cx, rw, dtype=np.float32)
         rel_x = np.clip(xs / sh_half_w, -1.0, 1.0)
-        thetas = rel_x * (math.pi / 3.0)
 
-        nx = np.sin(thetas)
-        nz = np.cos(thetas)
-        diffuse_1d = nx * self.light_dir[0] + nz * self.light_dir[2]
-        diffuse_1d = np.clip(diffuse_1d, 0.65, 1.10)
+        # 3D Cylindrical Cosine curvature: center is 1.0, sides curve away to 0.62
+        thetas = rel_x * (math.pi * 0.44)
+        diffuse_1d = 0.66 + 0.34 * np.cos(thetas)
+
+        # Virtual key light orientation bias
+        light_bias = 1.0 + 0.15 * rel_x * self.light_dir[0]
+        diffuse_1d = np.clip(diffuse_1d * light_bias, 0.55, 1.15)
 
         # Tile vertically across ROI
         shading_roi = np.tile(diffuse_1d, (rh, 1))
 
-        # Ambient Occlusion in armpit regions within ROI
+        # Ambient Occlusion in underarms and side rib seams
         l_sh = pose.left_shoulder
         r_sh = pose.right_shoulder
         chest_y = pose.chest[1]
-        r_ao = int(pose.shoulder_width * 0.16)
+        r_ao = int(max(10, pose.shoulder_width * 0.18))
 
-        l_armpit = (int(l_sh[0] + pose.shoulder_width * 0.08) - rx, int(chest_y) - ry)
-        r_armpit = (int(r_sh[0] - pose.shoulder_width * 0.08) - rx, int(chest_y) - ry)
+        l_armpit = (int(l_sh[0] + pose.shoulder_width * 0.05) - rx, int(chest_y) - ry)
+        r_armpit = (int(r_sh[0] - pose.shoulder_width * 0.05) - rx, int(chest_y) - ry)
 
+        ao_mask = np.ones((rh, rw), dtype=np.float32)
         if 0 <= l_armpit[0] < rw and 0 <= l_armpit[1] < rh:
-            cv2.circle(shading_roi, l_armpit, r_ao, 0.78, -1)
+            cv2.circle(ao_mask, l_armpit, r_ao, 0.70, -1)
         if 0 <= r_armpit[0] < rw and 0 <= r_armpit[1] < rh:
-            cv2.circle(shading_roi, r_armpit, r_ao, 0.78, -1)
+            cv2.circle(ao_mask, r_armpit, r_ao, 0.70, -1)
 
-        return shading_roi
+        ao_mask = cv2.GaussianBlur(ao_mask, (19, 19), 0)
+        return shading_roi * ao_mask
