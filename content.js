@@ -120,6 +120,30 @@
     document.addEventListener("mouseover", handleHostPageHover, true);
     document.addEventListener("click", handleHostPageClick, true);
     document.addEventListener("keydown", handleHostPageKeyDown, true);
+    document.addEventListener("dragstart", handleGlobalDragStart, true);
+    document.addEventListener("dragend", handleGlobalDragEnd, true);
+  }
+
+  // Track dragging element across the host document
+  let draggedGarmentElement = null;
+
+  function handleGlobalDragStart(e) {
+    const imgEl = findGarmentImageElement(e.target) || (e.target.tagName === "IMG" ? e.target : null);
+    if (imgEl) {
+      draggedGarmentElement = imgEl;
+      const url = extractHighResImageUrl(imgEl);
+      if (url && e.dataTransfer) {
+        try {
+          const enhancedUrl = enhanceCommerceImageUrl(url);
+          e.dataTransfer.setData("text/uri-list", enhancedUrl);
+          e.dataTransfer.setData("text/plain", enhancedUrl);
+        } catch {}
+      }
+    }
+  }
+
+  function handleGlobalDragEnd() {
+    draggedGarmentElement = null;
   }
 
   function toggleGarmentPicker(forceState) {
@@ -134,6 +158,7 @@
           Cancel Pick
         `;
       }
+      showToast("Click any clothing item on the page to try it on!", "info");
     } else {
       document.body.classList.remove("anywear-picker-active");
       if (pickerBox) pickerBox.style.display = "none";
@@ -153,26 +178,72 @@
     }
   }
 
+  /**
+   * Multi-Level Garment Element Resolver (Daraz / Amazon / Shopify / ASOS / Zara Fix):
+   * Traverses upwards and downwards through complex product card wrappers, link overlays,
+   * picture elements, and background styles to guarantee finding the product photo.
+   */
   function findGarmentImageElement(target) {
-    if (!target) return null;
+    if (!target || (typeof document !== "undefined" && target === document) || (typeof window !== "undefined" && target === window)) return null;
     // Disallow picking anything inside our extension modal
     if (rootContainer && rootContainer.contains(target)) return null;
-    if (target === pickerBox || pickerBox.contains(target)) return null;
+    if (pickerBox && (target === pickerBox || pickerBox.contains(target))) return null;
 
-    // Check if target itself is an image
+    // 1. Target itself is an IMG
     if (target.tagName === "IMG") return target;
 
-    // Check closest picture or container with img
-    const imgInside = target.querySelector("img");
-    if (imgInside) return imgInside;
+    // 2. Target is a PICTURE or FIGURE tag
+    if (target.tagName === "PICTURE" || target.tagName === "FIGURE") {
+      const innerImg = target.querySelector("img");
+      if (innerImg) return innerImg;
+    }
 
-    const parentImg = target.closest("picture")?.querySelector("img");
-    if (parentImg) return parentImg;
+    // 3. Direct child img element
+    const directChildImg = target.querySelector("img");
+    if (directChildImg) return directChildImg;
 
-    // Check if element has background-image style
-    const bg = window.getComputedStyle(target).backgroundImage;
-    if (bg && bg !== "none" && bg.startsWith("url(")) {
-      return target;
+    // 4. Check closest e-commerce product card or link wrapper (Daraz, Amazon, Shopify, Lazada, etc.)
+    const cardWrapper = target.closest(
+      "a, div[class*='product'], div[class*='item'], div[class*='gallery'], div[class*='image'], div[class*='thumb'], div[class*='photo'], div[class*='card'], li, article, figure, section"
+    );
+
+    if (cardWrapper && cardWrapper !== document.body) {
+      const candidateImgs = Array.from(cardWrapper.querySelectorAll("img"));
+      if (candidateImgs.length > 0) {
+        // Sort by area so we pick the primary product photo, not tiny icons, stars, or logos
+        candidateImgs.sort((a, b) => {
+          const rA = a.getBoundingClientRect();
+          const rB = b.getBoundingClientRect();
+          const areaA = (rA.width || a.naturalWidth || 0) * (rA.height || a.naturalHeight || 0);
+          const areaB = (rB.width || b.naturalWidth || 0) * (rB.height || b.naturalHeight || 0);
+          return areaB - areaA;
+        });
+        const bestImg = candidateImgs[0];
+        const r = bestImg.getBoundingClientRect();
+        if ((r.width > 24 && r.height > 24) || (bestImg.naturalWidth > 40)) {
+          return bestImg;
+        }
+      }
+    }
+
+    // 5. Check CSS background-image up the tree up to 5 levels
+    let curr = target;
+    let depth = 0;
+    while (curr && curr !== document.body && depth < 5) {
+      try {
+        const bg = window.getComputedStyle(curr).backgroundImage;
+        if (bg && bg !== "none" && bg.startsWith("url(")) {
+          return curr;
+        }
+      } catch {}
+      curr = curr.parentElement;
+      depth++;
+    }
+
+    // 6. Check parent siblings
+    if (target.parentElement) {
+      const siblingImg = target.parentElement.querySelector("img");
+      if (siblingImg) return siblingImg;
     }
 
     return null;
@@ -188,7 +259,7 @@
     }
 
     const rect = imgEl.getBoundingClientRect();
-    if (rect.width < 40 || rect.height < 40) return; // ignore tiny icons
+    if (rect.width < 30 || rect.height < 30) return; // ignore tiny icons
 
     const scrollX = window.scrollX || window.pageXOffset;
     const scrollY = window.scrollY || window.pageYOffset;
@@ -201,13 +272,39 @@
   }
 
   /**
+   * E-Commerce CDN High-Res URL Enhancer (Daraz / Shopify / Amazon / AliExpress):
+   * Upscales thumbnail suffixes into full studio high-resolution images.
+   */
+  function enhanceCommerceImageUrl(url) {
+    if (!url || typeof url !== "string") return url;
+
+    // 1. Daraz / Alibaba / AliExpress CDN: e.g. ..._100x100q80.jpg_.webp or _200x200.jpg
+    if (url.includes("alicdn.com") || url.includes("daraz") || url.includes("lazada")) {
+      url = url.replace(/_\d+x\d+[^.]*(\.[a-zA-Z0-9]+)/, "_800x800$1");
+      url = url.replace(/\.jpg_\.webp$/i, ".jpg").replace(/\.png_\.webp$/i, ".png");
+    }
+
+    // 2. Shopify CDN: replace _thumb, _small, _compact, _medium, _grande with _master
+    if (url.includes("cdn.shopify.com")) {
+      url = url.replace(/_(?:pico|icon|thumb|small|compact|medium|large|grande|100x100|200x200)\./i, "_master.");
+    }
+
+    // 3. Amazon: replace ._AC_SRxxx,xxx_.jpg or ._SLxxx_.jpg with ._AC_SL1500_.jpg
+    if (url.includes("images-amazon.com") || url.includes("media-amazon.com")) {
+      url = url.replace(/\._[A-Z0-9_,]+_\./, "._AC_SL1500_.");
+    }
+
+    return url;
+  }
+
+  /**
    * Advanced High-Res Image Extractor:
-   * Examines srcset, high-res data attributes common in Shopify, Amazon, Zara, Magento, etc.
+   * Examines data-zoom-image, data-large-img, srcset, lazy attributes.
    */
   function extractHighResImageUrl(el) {
     if (!el) return null;
 
-    // 1. Check data attributes first (commonly store 1500px zoom images)
+    // 1. Check data attributes first (commonly store 1500px zoom images on Daraz, Shopify, Amazon)
     const highResAttrs = [
       "data-zoom-image",
       "data-large-img",
@@ -218,12 +315,14 @@
       "data-large",
       "data-src",
       "data-lazy-src",
-      "data-old-hires"
+      "data-old-hires",
+      "data-img-src",
+      "data-lazy"
     ];
 
     for (const attr of highResAttrs) {
       const val = el.getAttribute(attr);
-      if (val && val.trim().length > 0) {
+      if (val && val.trim().length > 0 && !val.startsWith("data:image/gif")) {
         return resolveUrl(val.trim());
       }
     }
@@ -248,16 +347,18 @@
       }
     }
 
-    // 3. Fallback to standard src or currentSrc
-    if (el.currentSrc) return resolveUrl(el.currentSrc);
-    if (el.src) return resolveUrl(el.src);
+    // 3. Fallback to standard currentSrc or src
+    if (el.currentSrc && !el.currentSrc.startsWith("data:image/gif")) return resolveUrl(el.currentSrc);
+    if (el.src && !el.src.startsWith("data:image/gif")) return resolveUrl(el.src);
 
     // 4. Background-image extraction
-    const bg = window.getComputedStyle(el).backgroundImage;
-    if (bg && bg !== "none" && bg.startsWith("url(")) {
-      const cleanBg = bg.replace(/^url\(["']?/, "").replace(/["']?\)$/, "");
-      return resolveUrl(cleanBg);
-    }
+    try {
+      const bg = window.getComputedStyle(el).backgroundImage;
+      if (bg && bg !== "none" && bg.startsWith("url(")) {
+        const cleanBg = bg.replace(/^url\(["']?/, "").replace(/["']?\)$/, "");
+        return resolveUrl(cleanBg);
+      }
+    } catch {}
 
     return null;
   }
@@ -273,16 +374,26 @@
   function handleHostPageClick(e) {
     if (!state.isPickingGarment) return;
 
-    const imgEl = findGarmentImageElement(e.target);
-    if (!imgEl) return;
-
+    // CRITICAL: Always intercept and prevent default navigation on ANY click during pick mode!
+    // This prevents Daraz, Amazon, or Shopify <a> links from navigating the page away.
     e.preventDefault();
     e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    const imgEl = findGarmentImageElement(e.target);
+    if (!imgEl) {
+      showToast("No product image found on clicked element. Click directly on the garment photo or drag it into the widget!", "warning");
+      return;
+    }
 
     const highResUrl = extractHighResImageUrl(imgEl);
     if (highResUrl) {
-      console.log("[Anywear VTO] Selected Garment URL:", highResUrl);
-      setGarment(highResUrl, imgEl.alt || "Selected Garment");
+      const enhancedUrl = enhanceCommerceImageUrl(highResUrl);
+      console.log("[Anywear VTO] Selected Garment URL:", enhancedUrl);
+      setGarment(enhancedUrl, imgEl.alt || "Selected Garment");
+      showToast("Garment selected! Fitting onto body...", "success");
+    } else {
+      showToast("Could not extract image URL from selected element.", "error");
     }
 
     toggleGarmentPicker(false);
@@ -290,6 +401,12 @@
 
   function setGarment(url, title = "Garment Item") {
     state.activeClothUrl = url;
+
+    // Immediately display preview in active UI slot
+    const targetSlot = state.categoryMode === "BOTTOM" ? "BOTTOM" : "TOP";
+    updateSlotUi(targetSlot, url, title, "Analyzing & Fitting...");
+
+    showToast(`Loading garment: ${title.slice(0, 24)}...`, "info");
 
     // Send SET_CLOTH metadata event to backend over WebSocket with active slot mode
     sendWebSocketJson({
@@ -299,6 +416,80 @@
       title: title,
       timestamp: Date.now()
     });
+  }
+
+  /**
+   * HTML5 Drag-and-Drop Handler:
+   * Extracts garments from local files, web images, dragged HTML, or image URLs.
+   */
+  async function handleGarmentDrop(e) {
+    // 1. Check local files (e.g. desktop file explorer drag & drop)
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = Array.from(e.dataTransfer.files).find(f => f.type.startsWith("image/"));
+      if (file) {
+        showToast(`Reading image file: ${file.name}...`, "info");
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const dataUrl = event.target.result;
+          setGarment(dataUrl, file.name);
+          showToast(`Dropped local garment: ${file.name}`, "success");
+        };
+        reader.onerror = () => {
+          showToast("Failed to read dropped image file", "error");
+        };
+        reader.readAsDataURL(file);
+        return;
+      }
+    }
+
+    // 2. Check in-page dragged image reference
+    if (draggedGarmentElement) {
+      const highResUrl = extractHighResImageUrl(draggedGarmentElement);
+      if (highResUrl) {
+        const enhancedUrl = enhanceCommerceImageUrl(highResUrl);
+        const title = draggedGarmentElement.alt || "Dropped Garment";
+        setGarment(enhancedUrl, title);
+        showToast("Dropped garment from webpage! Fitting...", "success");
+        draggedGarmentElement = null;
+        return;
+      }
+    }
+
+    // 3. Check dragged HTML snippet (often contains <img> when dragging an image from Chrome)
+    const htmlData = e.dataTransfer ? e.dataTransfer.getData("text/html") : "";
+    if (htmlData) {
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlData, "text/html");
+        const img = doc.querySelector("img");
+        if (img) {
+          const rawUrl = extractHighResImageUrl(img);
+          if (rawUrl) {
+            const enhancedUrl = enhanceCommerceImageUrl(rawUrl);
+            setGarment(enhancedUrl, img.alt || "Dropped Product");
+            showToast("Extracted garment image from dropped element!", "success");
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn("[Anywear VTO] Error parsing dropped HTML:", err);
+      }
+    }
+
+    // 4. Check uri-list or plain text URL
+    const uriList = e.dataTransfer ? (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain")) : "";
+    if (uriList && uriList.trim().length > 0) {
+      const lines = uriList.split(/[\r\n]+/).map(l => l.trim()).filter(l => l.length > 0 && !l.startsWith("#"));
+      if (lines.length > 0) {
+        const firstUrl = resolveUrl(lines[0]);
+        const enhancedUrl = enhanceCommerceImageUrl(firstUrl);
+        setGarment(enhancedUrl, "Dropped Garment Link");
+        showToast("Dropped product link received! Fitting...", "success");
+        return;
+      }
+    }
+
+    showToast("Could not extract a valid garment image from drop.", "error");
   }
 
   function clearSlot(slot) {
@@ -979,6 +1170,19 @@
             <video id="vto-video" class="vto-video-element mirrored" autoplay playsinline muted></video>
             <canvas id="vton-render-canvas" class="vto-canvas-element"></canvas>
 
+            <!-- HTML5 Drag-and-Drop Garment Dropzone Overlay -->
+            <div id="vto-dropzone-overlay" class="vto-dropzone-overlay">
+              <div class="vto-dropzone-icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+              </div>
+              <div class="vto-dropzone-badge">Drop garment image here to try on</div>
+              <div class="vto-dropzone-sub">Drop web image, product link, or local image file</div>
+            </div>
+
             <!-- Neural Diffusion Result Banner Overlay (Hidden by default) -->
             <div id="vto-diffusion-banner" class="vto-diffusion-banner" style="display:none;">
               <div class="vto-diffusion-badge">
@@ -1164,7 +1368,8 @@
       diffusionBanner: shadowRoot.getElementById("vto-diffusion-banner"),
       diffusionLabel: shadowRoot.getElementById("vto-diffusion-label"),
       diffToggleBtn: shadowRoot.getElementById("vto-diff-toggle-btn"),
-      diffDismissBtn: shadowRoot.getElementById("vto-diff-dismiss-btn")
+      diffDismissBtn: shadowRoot.getElementById("vto-diff-dismiss-btn"),
+      dropzoneOverlay: shadowRoot.getElementById("vto-dropzone-overlay")
     };
 
     // Attach Event Listeners
@@ -1203,8 +1408,53 @@
     if (elements.modeSkelBtn) elements.modeSkelBtn.addEventListener("click", () => setViewMode("skeleton"));
     elements.modeCamBtn.addEventListener("click", () => setViewMode("camera"));
 
+    // Initialize HTML5 Drag-and-Drop dropzone on widget
+    initDropZone();
+
     // Restore persisted settings from chrome.storage.local
     loadPersistedSettings();
+  }
+
+  // =========================================================================
+  // 8.0 HTML5 Drag-and-Drop Dropzone Activation
+  // =========================================================================
+  function initDropZone() {
+    if (!elements.window) return;
+
+    let dragDepth = 0;
+
+    elements.window.addEventListener("dragenter", (e) => {
+      e.preventDefault();
+      dragDepth++;
+      elements.window.classList.add("vto-drag-active");
+    });
+
+    elements.window.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "copy";
+      }
+      if (!elements.window.classList.contains("vto-drag-active")) {
+        elements.window.classList.add("vto-drag-active");
+      }
+    });
+
+    elements.window.addEventListener("dragleave", (e) => {
+      e.preventDefault();
+      dragDepth--;
+      if (dragDepth <= 0) {
+        dragDepth = 0;
+        elements.window.classList.remove("vto-drag-active");
+      }
+    });
+
+    elements.window.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragDepth = 0;
+      elements.window.classList.remove("vto-drag-active");
+      await handleGarmentDrop(e);
+    });
   }
 
   // =========================================================================
