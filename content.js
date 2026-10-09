@@ -40,10 +40,12 @@
     reconnectAttempts: 0,
     maxReconnectDelay: 8000,
     
-    // Video streaming parameters
-    targetFps: 18,
-    frameIntervalMs: Math.round(1000 / 18),
+    // Video streaming parameters (Ultra-low latency ping-pong lock)
+    targetFps: 30,
+    frameIntervalMs: 33,
     lastFrameSentAt: 0,
+    isFrameInFlight: false,
+    frameInFlightTime: 0,
     pendingFrameCount: 0,
     streamTimer: null,
     
@@ -389,6 +391,8 @@
       state.ws.onclose = (event) => {
         console.warn(`[Anywear VTO] WebSocket closed (code: ${event.code}). Scheduling reconnect...`);
         state.wsConnected = false;
+        state.isFrameInFlight = false;
+        state.sentFrameTimestamps.clear();
         updateConnectionUi("disconnected");
         scheduleReconnect();
       };
@@ -396,6 +400,8 @@
       state.ws.onerror = (err) => {
         console.error("[Anywear VTO] WebSocket error:", err);
         state.wsConnected = false;
+        state.isFrameInFlight = false;
+        state.sentFrameTimestamps.clear();
         updateConnectionUi("error");
       };
     } catch (e) {
@@ -470,28 +476,36 @@
           elements.toggleCamBtn.title = "Turn Off Camera";
         }
 
-        // Initialize offscreen capture canvas matching video track dimensions
+        // Initialize offscreen capture canvas downscaled to 480x360 for ultra-low latency
         const track = mediaStream.getVideoTracks()[0];
         const settings = track.getSettings();
-        const width = settings.width || 640;
-        const height = settings.height || 480;
+        const rawWidth = settings.width || 640;
+        const rawHeight = settings.height || 480;
+
+        // Clamped downscale to 480x360 (or preserve aspect ratio with max dimension 480)
+        const targetWidth = 480;
+        const targetHeight = Math.round(targetWidth * (rawHeight / rawWidth)) || 360;
 
         captureCanvas = document.createElement("canvas");
-        captureCanvas.width = width;
-        captureCanvas.height = height;
+        captureCanvas.width = targetWidth;
+        captureCanvas.height = targetHeight;
         captureCtx = captureCanvas.getContext("2d", { willReadFrequently: true });
 
         // Synchronize on-screen overlay canvas resolution
         if (elements.canvas) {
-          elements.canvas.width = width;
-          elements.canvas.height = height;
+          elements.canvas.width = targetWidth;
+          elements.canvas.height = targetHeight;
         }
 
+        state.isFrameInFlight = false;
+        state.sentFrameTimestamps.clear();
         startFrameStreamLoop();
       }
     } catch (err) {
       console.error("[Anywear VTO] getUserMedia permission or device error:", err);
       state.isCameraRunning = false;
+      state.isFrameInFlight = false;
+      state.sentFrameTimestamps.clear();
       if (elements.placeholder) {
         elements.placeholder.classList.remove("hidden");
         elements.placeholder.innerHTML = `
@@ -518,6 +532,13 @@
       elements.video.srcObject = null;
     }
     state.isCameraRunning = false;
+    state.isFrameInFlight = false;
+    state.frameInFlightTime = 0;
+    state.sentFrameTimestamps.clear();
+    if (state.streamTimer) {
+      clearInterval(state.streamTimer);
+      state.streamTimer = null;
+    }
     if (elements.toggleCamBtn) {
       elements.toggleCamBtn.classList.remove("active");
       elements.toggleCamBtn.title = "Turn On Camera";
@@ -545,28 +566,40 @@
   }
 
   // =========================================================================
-  // 4. Low-Latency Frame Capture & WebSocket Transmission (~15-20 FPS)
+  // 4. Low-Latency Frame Capture & WebSocket Transmission (In-Flight Lock)
   // =========================================================================
   function startFrameStreamLoop() {
     if (state.streamTimer) return;
-
+    state.isFrameInFlight = false;
     state.streamTimer = setInterval(captureAndSendFrame, state.frameIntervalMs);
   }
 
   function captureAndSendFrame() {
     if (!state.isCameraRunning || !state.wsConnected) return;
     if (!elements.video || elements.video.readyState < 2) return;
-    if (state.ws.readyState !== WebSocket.OPEN) return;
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
 
-    // Throttle if WebSocket buffer is backing up (network backpressure)
-    if (state.ws.bufferedAmount > 256 * 1024) {
+    // IN-FLIGHT FRAME LOCK:
+    // NEVER send a new frame if the previous frame has not yet returned from the server.
+    if (state.isFrameInFlight) {
+      // Watchdog failsafe: if a frame is lost/dropped for >250ms, unlock so stream never stalls
+      if (Date.now() - state.frameInFlightTime > 250) {
+        state.isFrameInFlight = false;
+        state.sentFrameTimestamps.clear();
+      } else {
+        return; // Skip this tick! Eliminates queue buffer bloat and latency buildup completely.
+      }
+    }
+
+    // Backpressure safeguard: skip if socket buffer has queued data
+    if (state.ws.bufferedAmount > 64 * 1024) {
       return;
     }
 
     const width = captureCanvas.width;
     const height = captureCanvas.height;
 
-    // Draw current webcam frame to offscreen canvas
+    // Draw current webcam frame to downscaled offscreen canvas
     captureCtx.save();
     if (state.isMirrored) {
       // Mirror horizontally so server processes natural selfie perspective
@@ -576,34 +609,53 @@
     captureCtx.drawImage(elements.video, 0, 0, width, height);
     captureCtx.restore();
 
-    // Export frame as JPEG Blob (quality: 0.70 for optimal latency/quality balance)
+    state.isFrameInFlight = true;
+    state.frameInFlightTime = Date.now();
+
+    // Export frame as JPEG Blob (quality: 0.65 for instant downscaled serialization)
     captureCanvas.toBlob((blob) => {
-      if (!blob || state.ws.readyState !== WebSocket.OPEN) return;
+      if (!blob || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        state.isFrameInFlight = false;
+        return;
+      }
 
       const seq = ++state.frameSeq;
       const sendTime = Date.now();
       state.sentFrameTimestamps.set(seq, sendTime);
 
-      // Clean up old timestamps
-      if (state.sentFrameTimestamps.size > 100) {
-        const oldestKey = state.sentFrameTimestamps.keys().next().value;
-        state.sentFrameTimestamps.delete(oldestKey);
+      // Keep only current sequence to avoid unbounded Map growth
+      if (state.sentFrameTimestamps.size > 5) {
+        state.sentFrameTimestamps.clear();
+        state.sentFrameTimestamps.set(seq, sendTime);
       }
 
-      // Convert Blob to ArrayBuffer and send directly over WebSocket
       blob.arrayBuffer().then((buffer) => {
         if (state.ws && state.ws.readyState === WebSocket.OPEN) {
           state.ws.send(buffer);
           state.fpsCalc.clientFrames++;
+        } else {
+          state.isFrameInFlight = false;
         }
+      }).catch(() => {
+        state.isFrameInFlight = false;
       });
-    }, "image/jpeg", 0.70);
+    }, "image/jpeg", 0.65);
   }
 
   // =========================================================================
   // 5. Server Frame Rendering & Overlay Canvas Processing
   // =========================================================================
   async function handleServerBinaryFrame(arrayBuffer) {
+    // Release in-flight lock immediately
+    state.isFrameInFlight = false;
+
+    // Calculate exact Round-Trip Latency (RTT)
+    const now = Date.now();
+    if (state.frameInFlightTime > 0) {
+      state.fpsCalc.currentLatencyMs = Math.max(1, now - state.frameInFlightTime);
+    }
+    state.sentFrameTimestamps.clear();
+
     if (!elements.canvas) return;
 
     try {
@@ -613,15 +665,6 @@
       const ctx = elements.canvas.getContext("2d");
       ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
       ctx.drawImage(imageBitmap, 0, 0, elements.canvas.width, elements.canvas.height);
-
-      // Estimate RTT latency based on most recent frame
-      const now = Date.now();
-      if (state.sentFrameTimestamps.size > 0) {
-        const firstSeq = state.sentFrameTimestamps.keys().next().value;
-        const sentTime = state.sentFrameTimestamps.get(firstSeq);
-        state.sentFrameTimestamps.delete(firstSeq);
-        state.fpsCalc.currentLatencyMs = Math.max(1, now - sentTime);
-      }
     } catch (err) {
       console.error("[Anywear VTO] Error rendering server frame:", err);
     }
@@ -926,7 +969,7 @@
         <!-- Footer Bar with Media Controls -->
         <div class="vto-footer">
           <div class="vto-footer-left">
-            <span>Stream: 640x480 @ 18fps</span>
+            <span>Stream: 480x360 @ 30fps (Low-Latency)</span>
           </div>
           <div class="vto-footer-right">
             <button id="vto-snapshot-btn" class="vto-tool-icon-btn" title="Capture Try-On Photo">

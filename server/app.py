@@ -135,8 +135,8 @@ def process_video_frame_sync(
         # 3. Telemetry HUD Overlay
         frame = draw_hud(frame, session, pose)
 
-        # 4. Fast JPEG Re-encoding
-        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+        # 4. Fast JPEG Re-encoding (Quality 70 for instantaneous binary serialization)
+        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
         success, encoded_jpg = cv2.imencode(".jpg", frame, encode_params)
         if success:
             return encoded_jpg.tobytes()
@@ -243,12 +243,26 @@ async def websocket_stream_endpoint(websocket: WebSocket):
     session = ClientSession(client_id=client_ip)
     logger.info(f"WebSocket client connected: {client_ip}")
 
-    try:
-        while True:
-            msg = await websocket.receive()
+    # Drop-oldest single-slot queue to eliminate buffer bloat & queue lag
+    frame_queue = asyncio.Queue(maxsize=1)
+    stop_event = asyncio.Event()
 
-            if "bytes" in msg and msg["bytes"]:
-                raw_bytes = msg["bytes"]
+    async def worker_loop():
+        """Processes only the freshest frame, discarding stale buffered frames."""
+        while not stop_event.is_set():
+            try:
+                # Wait for next available frame
+                raw_bytes = await frame_queue.get()
+                frame_queue.task_done()
+
+                # If a newer frame arrived while waiting, skip to the latest
+                while not frame_queue.empty():
+                    try:
+                        raw_bytes = frame_queue.get_nowait()
+                        frame_queue.task_done()
+                    except (asyncio.QueueEmpty, ValueError):
+                        break
+
                 encoded_bytes = await loop.run_in_executor(
                     executor,
                     process_video_frame_sync,
@@ -258,6 +272,30 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                 if encoded_bytes:
                     await websocket.send_bytes(encoded_bytes)
                     session.frames_sent += 1
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in video worker loop: {e}", exc_info=True)
+
+    worker_task = asyncio.create_task(worker_loop())
+
+    try:
+        while True:
+            msg = await websocket.receive()
+
+            if "bytes" in msg and msg["bytes"]:
+                raw_bytes = msg["bytes"]
+                # Drop-oldest policy: discard any unconsumed older frame and keep newest
+                if frame_queue.full():
+                    try:
+                        frame_queue.get_nowait()
+                        frame_queue.task_done()
+                    except (asyncio.QueueEmpty, ValueError):
+                        pass
+                try:
+                    frame_queue.put_nowait(raw_bytes)
+                except asyncio.QueueFull:
+                    pass
 
             elif "text" in msg and msg["text"]:
                 raw_text = msg["text"]
@@ -351,6 +389,13 @@ async def websocket_stream_endpoint(websocket: WebSocket):
         logger.info(f"Client disconnected: {client_ip}")
     except Exception as e:
         logger.error(f"WebSocket error: {e}", exc_info=True)
+    finally:
+        stop_event.set()
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":
