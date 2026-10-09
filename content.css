@@ -1,0 +1,697 @@
+/* ==========================================================================
+   Anywear VTO - Scoped Content Styling
+   Glassmorphism Dark Theme & Host Page Garment Picker Overlay
+   ========================================================================== */
+
+/* Host Page Picker Highlighting Styles */
+body.anywear-picker-active {
+  cursor: crosshair !important;
+  user-select: none !important;
+}
+
+body.anywear-picker-active * {
+  cursor: crosshair !important;
+}
+
+/* Garment highlighter box rendered directly on host page */
+#anywear-picker-box {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2147483640;
+  border: 2.5px solid #6366f1;
+  background: rgba(99, 102, 241, 0.15);
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.6), inset 0 0 15px rgba(99, 102, 241, 0.2);
+  border-radius: 8px;
+  transition: all 0.12s ease-out;
+  display: none;
+}
+
+#anywear-picker-badge {
+  position: absolute;
+  top: -30px;
+  left: 0;
+  background: linear-gradient(135deg, #6366f1, #a855f7);
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Root Container & Shadow DOM Boundary
+   ========================================================================== */
+#anywear-vton-root {
+  all: initial;
+  position: fixed;
+  z-index: 2147483647;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ==========================================================================
+   Main Floating Window
+   ========================================================================== */
+.vto-window {
+  position: fixed;
+  width: 360px;
+  background: rgba(13, 16, 28, 0.88);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7),
+              0 0 35px -5px rgba(99, 102, 241, 0.35),
+              inset 0 1px 1px rgba(255, 255, 255, 0.15);
+  color: #f1f5f9;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: box-shadow 0.25s ease, transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+.vto-window * {
+  box-sizing: border-box;
+}
+
+.vto-window.vto-minimized {
+  width: auto;
+  min-width: 200px;
+  background: rgba(13, 16, 28, 0.94);
+  border-radius: 28px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5), 0 0 16px rgba(99, 102, 241, 0.3);
+}
+
+.vto-window.vto-minimized .vto-body,
+.vto-window.vto-minimized .vto-footer {
+  display: none !important;
+}
+
+/* ==========================================================================
+   Header Bar (Draggable handle)
+   ========================================================================== */
+.vto-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  cursor: grab;
+}
+
+.vto-header:active {
+  cursor: grabbing;
+}
+
+.vto-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vto-logo-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #6366f1, #a855f7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+}
+
+.vto-logo-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: #ffffff;
+}
+
+.vto-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  background: linear-gradient(90deg, #ffffff, #c7d2fe);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.vto-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.25);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  letter-spacing: 0.5px;
+}
+
+.vto-window-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vto-icon-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  padding: 0;
+}
+
+.vto-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.vto-icon-btn.close-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+/* ==========================================================================
+   Body Content
+   ========================================================================== */
+.vto-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Video & Canvas Viewport */
+.vto-viewport {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #090b14;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vto-video-element,
+.vto-canvas-element {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 12px;
+}
+
+.vto-video-element.mirrored {
+  transform: scaleX(-1);
+}
+
+.vto-canvas-element {
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+
+.vto-canvas-element.hidden {
+  opacity: 0;
+}
+
+/* Fallback/Camera Permission state */
+.vto-viewport-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 16px;
+  gap: 8px;
+  color: #64748b;
+  z-index: 5;
+}
+
+.vto-viewport-placeholder.hidden {
+  display: none !important;
+}
+
+.vto-placeholder-icon {
+  width: 38px;
+  height: 38px;
+  color: #475569;
+}
+
+.vto-placeholder-text {
+  font-size: 12px;
+  line-height: 1.4;
+  color: #94a3b8;
+}
+
+/* Over-Video HUD Stats */
+.vto-hud {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.vto-stat-pill {
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #cbd5e1;
+}
+
+.vto-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ef4444;
+  transition: background 0.3s ease;
+}
+
+.vto-status-dot.connected {
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+
+.vto-status-dot.connecting {
+  background: #f59e0b;
+  box-shadow: 0 0 6px #f59e0b;
+}
+
+/* View Mode Switcher on Video */
+.vto-mode-pill {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  z-index: 10;
+  display: flex;
+  background: rgba(15, 23, 42, 0.8);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.vto-mode-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.vto-mode-btn.active {
+  background: #6366f1;
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.4);
+}
+
+/* ==========================================================================
+   Category Selector & Lighting Slider
+   ========================================================================== */
+.vto-selector-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+
+.vto-row-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+.vto-category-pill {
+  display: flex;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.vto-cat-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.vto-cat-btn.active {
+  background: #6366f1;
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.4);
+}
+
+.vto-slider-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.vto-slider-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.vto-slider-val {
+  font-size: 11px;
+  font-weight: 700;
+  color: #818cf8;
+}
+
+.vto-range-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.15);
+  outline: none;
+  cursor: pointer;
+}
+
+.vto-range-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #6366f1;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.7);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.vto-range-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+/* ==========================================================================
+   Dual Garment Slots (Top & Bottom)
+   ========================================================================== */
+.vto-slots-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vto-slot-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  padding: 7px 10px;
+  position: relative;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.vto-slot-card:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.vto-slot-badge {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.vto-slot-badge.top-badge {
+  background: rgba(99, 102, 241, 0.25);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.4);
+}
+
+.vto-slot-badge.bot-badge {
+  background: rgba(236, 72, 153, 0.25);
+  color: #f472b6;
+  border: 1px solid rgba(236, 72, 153, 0.4);
+}
+
+.vto-slot-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.vto-slot-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.vto-slot-info {
+  flex: 1;
+  min-width: 0;
+  padding-right: 28px;
+}
+
+.vto-slot-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vto-slot-sub {
+  font-size: 10px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vto-slot-clear {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  background: none;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  transition: color 0.15s ease;
+}
+
+.vto-slot-clear:hover {
+  color: #ef4444;
+}
+
+/* ==========================================================================
+   Action Buttons
+   ========================================================================== */
+.vto-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.vto-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.vto-btn-primary {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+}
+
+.vto-btn-primary:hover {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  box-shadow: 0 6px 18px rgba(99, 102, 241, 0.5);
+  transform: translateY(-1px);
+}
+
+.vto-btn-primary.picking {
+  background: linear-gradient(135deg, #ec4899, #f43f5e);
+  box-shadow: 0 0 16px rgba(244, 63, 94, 0.6);
+  animation: vto-pulse-pick 1.5s infinite;
+}
+
+@keyframes vto-pulse-pick {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+.vto-btn-secondary {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+}
+
+.vto-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* ==========================================================================
+   Footer Status Bar
+   ========================================================================== */
+.vto-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.vto-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vto-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vto-tool-icon-btn {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.vto-tool-icon-btn:hover {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.vto-tool-icon-btn.active {
+  color: #6366f1;
+}
+
+/* ==========================================================================
+   Toast Notification Banner
+   ========================================================================== */
+.vto-toast {
+  position: absolute;
+  bottom: 46px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  color: #f8fafc;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 20px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 12px rgba(99, 102, 241, 0.35);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 100;
+  pointer-events: none;
+  opacity: 0;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+}
+
+.vto-toast.show {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+}
+
+.vto-toast.success {
+  border-color: rgba(16, 185, 129, 0.5);
+  color: #34d399;
+}
+
+.vto-toast.error {
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #f87171;
+}

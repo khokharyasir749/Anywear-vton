@@ -1,0 +1,387 @@
+"""
+Anywear VTO - Advanced Virtual Try-On Engine (Step 3)
+Features:
+ - Multi-Garment Support: Independent Tops and Bottoms swapping
+ - Realistic Depth Shading, Fabric Wrinkle Transfer, and Ambient Occlusion
+ - Micro-Draping Physics (Inertia & Elastic Fabric Sway)
+ - Body Parsing Isolation & Bilateral Edge Feathering
+"""
+
+import logging
+import math
+import time
+from typing import Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+from body_parser import BodyParser
+from depth_shading import DepthShadingEngine
+from garment_processor import GarmentData
+from pose_detector import PoseData
+
+logger = logging.getLogger("anywear-vton.engine")
+
+
+class FabricPhysics:
+    """Simulates 2D elastic spring-damper cloth drape inertia."""
+
+    def __init__(self):
+        self.hem_offset_x = 0.0
+        self.hem_vel_x = 0.0
+        self.prev_user_cx = None
+        self.last_time = time.time()
+
+    def update(self, user_cx: float) -> float:
+        now = time.time()
+        dt = np.clip(now - self.last_time, 0.016, 0.10)
+        self.last_time = now
+
+        if self.prev_user_cx is None:
+            self.prev_user_cx = user_cx
+            return 0.0
+
+        # User lateral velocity (movement to left or right)
+        user_vel_x = (user_cx - self.prev_user_cx) / dt
+        self.prev_user_cx = user_cx
+
+        # Inertia opposes user motion: target offset is -user_vel_x * inertia_factor
+        target_lag = np.clip(-user_vel_x * 0.018, -25.0, 25.0)
+
+        # Spring-damper physics
+        spring_k = 18.0
+        damping = 7.5
+        acc = spring_k * (target_lag - self.hem_offset_x) - damping * self.hem_vel_x
+        self.hem_vel_x += acc * dt
+        self.hem_offset_x += self.hem_vel_x * dt
+
+        return float(self.hem_offset_x)
+
+
+class VTONEngine:
+    """
+    Advanced real-time Virtual Try-On Engine with depth-aware shading,
+    fabric wrinkle synthesis, body segmentation isolation, and micro-draping physics.
+    """
+
+    def __init__(self):
+        self.depth_shading = DepthShadingEngine()
+        self.body_parser = BodyParser()
+        self.physics = FabricPhysics()
+
+        # Mesh Triangulation Topology for TOPS
+        self.top_triangles = [
+            ("collar_center", "left_shoulder", "chest_center"),
+            ("collar_center", "right_shoulder", "chest_center"),
+            ("left_shoulder", "left_mid", "chest_center"),
+            ("right_shoulder", "right_mid", "chest_center"),
+            ("left_mid", "left_hem", "waist_center"),
+            ("left_mid", "waist_center", "chest_center"),
+            ("right_mid", "right_hem", "waist_center"),
+            ("right_mid", "chest_center", "waist_center"),
+        ]
+
+        # Mesh Triangulation Topology for BOTTOMS
+        self.bottom_triangles = [
+            ("waist_center", "left_waist", "crotch_center"),
+            ("waist_center", "right_waist", "crotch_center"),
+            ("left_waist", "left_knee", "crotch_center"),
+            ("right_waist", "right_knee", "crotch_center"),
+            ("left_knee", "left_ankle", "crotch_center"),
+            ("right_knee", "right_ankle", "crotch_center"),
+        ]
+
+    def render(
+        self,
+        frame: np.ndarray,
+        pose: PoseData,
+        top_garment: Optional[GarmentData] = None,
+        bottom_garment: Optional[GarmentData] = None,
+        lighting_intensity: float = 0.85,
+        enable_physics: bool = True
+    ) -> np.ndarray:
+        """
+        Renders active Top and/or active Bottom garments onto the user's frame
+        with independent segmentation isolation and realistic depth-wrinkle synthesis.
+        """
+        if frame is None or not pose.detected:
+            return frame
+        if top_garment is None and bottom_garment is None:
+            return frame
+
+        h, w = frame.shape[:2]
+        output = frame.copy()
+
+        # Update micro-draping fabric inertia
+        drape_lag_x = self.physics.update(pose.neck[0]) if enable_physics else 0.0
+
+        # Extract body segment isolation masks
+        body_masks = self.body_parser.get_body_masks(frame, pose)
+
+        # 1. Render BOTTOM Garment (Pants / Jeans) if active
+        if bottom_garment is not None:
+            output = self._render_single_garment(
+                canvas_frame=output,
+                original_frame=frame,
+                pose=pose,
+                garment=bottom_garment,
+                region_mask=body_masks["lower_torso"],
+                lighting_intensity=lighting_intensity,
+                drape_lag_x=drape_lag_x * 0.4
+            )
+
+        # 2. Render TOP Garment (Shirt / Jacket) if active
+        if top_garment is not None:
+            output = self._render_single_garment(
+                canvas_frame=output,
+                original_frame=frame,
+                pose=pose,
+                garment=top_garment,
+                region_mask=body_masks["upper_torso"],
+                lighting_intensity=lighting_intensity,
+                drape_lag_x=drape_lag_x
+            )
+
+        return output
+
+    def _render_single_garment(
+        self,
+        canvas_frame: np.ndarray,
+        original_frame: np.ndarray,
+        pose: PoseData,
+        garment: GarmentData,
+        region_mask: np.ndarray,
+        lighting_intensity: float,
+        drape_lag_x: float
+    ) -> np.ndarray:
+        """
+        Executes mesh warping, depth shading, fold transfer, and feathered blending
+        for a single garment against its isolated body region.
+        """
+        h, w = canvas_frame.shape[:2]
+
+        # 1. Compute target destination anchors on user's body
+        dst_anchors = self._compute_target_anchors(pose, garment, w, h, drape_lag_x)
+        if not dst_anchors:
+            return canvas_frame
+
+        # 2. Piecewise Affine Mesh Warping
+        warped_bgr, warped_alpha = self._warp_mesh(garment, dst_anchors, w, h)
+        if np.max(warped_alpha) < 10:
+            return canvas_frame
+
+        # 3. Constrain to Body Segmentation Mask (ensures Tops don't spill to legs, Bottoms don't spill to chest)
+        if region_mask is not None:
+            norm_region = region_mask.astype(np.float32) / 255.0
+            warped_alpha = (warped_alpha.astype(np.float32) * norm_region).astype(np.uint8)
+
+        # 4. Realistic Depth Shading, Fabric Wrinkles & Ambient Occlusion
+        shaded_bgr = self.depth_shading.apply_shading(
+            warped_bgr=warped_bgr,
+            warped_alpha=warped_alpha,
+            original_frame=original_frame,
+            pose=pose,
+            intensity=lighting_intensity
+        )
+
+        # 5. Bilateral Edge Feathering & Soft Alpha Compositing
+        return self._composite_feathered(canvas_frame, shaded_bgr, warped_alpha)
+
+    def _compute_target_anchors(
+        self,
+        pose: PoseData,
+        garment: GarmentData,
+        w: int,
+        h: int,
+        drape_lag_x: float
+    ) -> Optional[Dict[str, Tuple[float, float]]]:
+        """
+        Calculates user body anchor locations with micro-draping physics offsets.
+        """
+        dst = {}
+        l_sh = pose.left_shoulder
+        r_sh = pose.right_shoulder
+        neck = pose.neck
+        waist = pose.waist
+        chest = pose.chest
+
+        sh_vec_x = r_sh[0] - l_sh[0]
+        sh_vec_y = r_sh[1] - l_sh[1]
+        sh_len = max(1.0, math.hypot(sh_vec_x, sh_vec_y))
+        u_sh_x = sh_vec_x / sh_len
+        u_sh_y = sh_vec_y / sh_len
+
+        down_x = -u_sh_y
+        down_y = u_sh_x
+        if down_y < 0:
+            down_x, down_y = -down_x, -down_y
+
+        torso_len = max(1.0, math.hypot(waist[0] - neck[0], waist[1] - neck[1]))
+
+        if garment.category == "TOP":
+            sleeve_margin = sh_len * 0.16
+
+            dst["left_shoulder"] = (
+                l_sh[0] - u_sh_x * sleeve_margin,
+                l_sh[1] - u_sh_y * sleeve_margin - torso_len * 0.04
+            )
+            dst["right_shoulder"] = (
+                r_sh[0] + u_sh_x * sleeve_margin,
+                r_sh[1] + u_sh_y * sleeve_margin - torso_len * 0.04
+            )
+            dst["collar_center"] = (
+                neck[0] + down_x * (torso_len * 0.05),
+                neck[1] + down_y * (torso_len * 0.05)
+            )
+            dst["chest_center"] = (chest[0], chest[1])
+
+            # Mid-torso
+            mid_center = (
+                neck[0] + down_x * (torso_len * 0.55),
+                neck[1] + down_y * (torso_len * 0.55)
+            )
+            half_mid_w = (sh_len * 0.52)
+            dst["left_mid"] = (
+                mid_center[0] - u_sh_x * half_mid_w + drape_lag_x * 0.5,
+                mid_center[1] - u_sh_y * half_mid_w
+            )
+            dst["right_mid"] = (
+                mid_center[0] + u_sh_x * half_mid_w + drape_lag_x * 0.5,
+                mid_center[1] + u_sh_y * half_mid_w
+            )
+
+            # Lower hem with micro-draping physics lag
+            hem_center = (
+                neck[0] + down_x * (torso_len * 1.08),
+                neck[1] + down_y * (torso_len * 1.08)
+            )
+            half_hem_w = (sh_len * 0.56)
+            dst["left_hem"] = (
+                hem_center[0] - u_sh_x * half_hem_w + drape_lag_x,
+                hem_center[1] - u_sh_y * half_hem_w
+            )
+            dst["right_hem"] = (
+                hem_center[0] + u_sh_x * half_hem_w + drape_lag_x,
+                hem_center[1] + u_sh_y * half_hem_w
+            )
+            dst["waist_center"] = (hem_center[0] + drape_lag_x, hem_center[1])
+
+        else: # BOTTOM
+            l_hip = pose.left_hip
+            r_hip = pose.right_hip
+            hip_len = max(1.0, math.hypot(r_hip[0] - l_hip[0], r_hip[1] - l_hip[1]))
+
+            dst["waist_center"] = (waist[0], waist[1] + torso_len * 0.04)
+            dst["left_waist"] = (l_hip[0] - u_sh_x * (hip_len * 0.15), l_hip[1] + torso_len * 0.04)
+            dst["right_waist"] = (r_hip[0] + u_sh_x * (hip_len * 0.15), r_hip[1] + torso_len * 0.04)
+            dst["crotch_center"] = (waist[0] + down_x * (hip_len * 0.52), waist[1] + down_y * (hip_len * 0.52))
+
+            dst["left_knee"] = (pose.left_knee[0] + drape_lag_x * 0.6, pose.left_knee[1])
+            dst["right_knee"] = (pose.right_knee[0] + drape_lag_x * 0.6, pose.right_knee[1])
+            dst["left_ankle"] = (pose.left_ankle[0] + drape_lag_x, pose.left_ankle[1])
+            dst["right_ankle"] = (pose.right_ankle[0] + drape_lag_x, pose.right_ankle[1])
+
+        return dst
+
+    def _warp_mesh(
+        self,
+        garment: GarmentData,
+        dst_anchors: Dict[str, Tuple[float, float]],
+        out_w: int,
+        out_h: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Performs piecewise affine mesh warping."""
+        warped_bgr = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        warped_alpha = np.zeros((out_h, out_w), dtype=np.uint8)
+
+        src_anchors = garment.anchors
+        garment_bgr = garment.image_bgra[:, :, :3]
+        garment_alpha = garment.image_bgra[:, :, 3]
+
+        triangles = self.top_triangles if garment.category == "TOP" else self.bottom_triangles
+
+        for p1, p2, p3 in triangles:
+            if not (p1 in src_anchors and p2 in src_anchors and p3 in src_anchors):
+                continue
+            if not (p1 in dst_anchors and p2 in dst_anchors and p3 in dst_anchors):
+                continue
+
+            src_tri = np.array([src_anchors[p1], src_anchors[p2], src_anchors[p3]], dtype=np.float32)
+            dst_tri = np.array([dst_anchors[p1], dst_anchors[p2], dst_anchors[p3]], dtype=np.float32)
+
+            self._warp_triangle(garment_bgr, garment_alpha, warped_bgr, warped_alpha, src_tri, dst_tri)
+
+        return warped_bgr, warped_alpha
+
+    def _warp_triangle(
+        self,
+        src_bgr: np.ndarray,
+        src_alpha: np.ndarray,
+        dst_bgr: np.ndarray,
+        dst_alpha: np.ndarray,
+        src_tri: np.ndarray,
+        dst_tri: np.ndarray
+    ):
+        r1 = cv2.boundingRect(src_tri)
+        r2 = cv2.boundingRect(dst_tri)
+
+        if r1[2] <= 0 or r1[3] <= 0 or r2[2] <= 0 or r2[3] <= 0:
+            return
+        if r2[0] >= dst_bgr.shape[1] or r2[1] >= dst_bgr.shape[0]:
+            return
+
+        src_tri_crop = [(src_tri[i][0] - r1[0], src_tri[i][1] - r1[1]) for i in range(3)]
+        dst_tri_crop = [(dst_tri[i][0] - r2[0], dst_tri[i][1] - r2[1]) for i in range(3)]
+
+        src_crop_bgr = src_bgr[r1[1]:r1[1] + r1[3], r1[0]:r1[0] + r1[2]]
+        src_crop_alpha = src_alpha[r1[1]:r1[1] + r1[3], r1[0]:r1[0] + r1[2]]
+
+        warp_mat = cv2.getAffineTransform(np.float32(src_tri_crop), np.float32(dst_tri_crop))
+
+        warped_crop_bgr = cv2.warpAffine(
+            src_crop_bgr, warp_mat, (r2[2], r2[3]),
+            None, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101
+        )
+        warped_crop_alpha = cv2.warpAffine(
+            src_crop_alpha, warp_mat, (r2[2], r2[3]),
+            None, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        )
+
+        tri_mask = np.zeros((r2[3], r2[2]), dtype=np.uint8)
+        cv2.fillConvexPoly(tri_mask, np.int32(dst_tri_crop), 255, 16, 0)
+
+        x1, y1 = max(0, r2[0]), max(0, r2[1])
+        x2, y2 = min(dst_bgr.shape[1], r2[0] + r2[2]), min(dst_bgr.shape[0], r2[1] + r2[3])
+
+        crop_x1 = x1 - r2[0]
+        crop_y1 = y1 - r2[1]
+        crop_x2 = crop_x1 + (x2 - x1)
+        crop_y2 = crop_y1 + (y2 - y1)
+
+        valid = (tri_mask[crop_y1:crop_y2, crop_x1:crop_x2] > 0) & \
+                (warped_crop_alpha[crop_y1:crop_y2, crop_x1:crop_x2] > 0)
+
+        dst_bgr[y1:y2, x1:x2][valid] = warped_crop_bgr[crop_y1:crop_y2, crop_x1:crop_x2][valid]
+        dst_alpha[y1:y2, x1:x2][valid] = warped_crop_alpha[crop_y1:crop_y2, crop_x1:crop_x2][valid]
+
+    def _composite_feathered(
+        self,
+        canvas: np.ndarray,
+        garment_bgr: np.ndarray,
+        alpha: np.ndarray
+    ) -> np.ndarray:
+        """Applies bilateral edge feathering and linear alpha compositing restricted to active ROI."""
+        rx, ry, rw, rh = cv2.boundingRect(alpha)
+        if rw <= 0 or rh <= 0:
+            return canvas
+
+        alpha_crop = alpha[ry:ry + rh, rx:rx + rw]
+        feathered = cv2.GaussianBlur(alpha_crop, (5, 5), 0)
+        norm_alpha = (feathered.astype(np.float32) / 255.0)[:, :, np.newaxis]
+
+        garment_crop = garment_bgr[ry:ry + rh, rx:rx + rw].astype(np.float32)
+        canvas_crop = canvas[ry:ry + rh, rx:rx + rw].astype(np.float32)
+
+        blended = norm_alpha * garment_crop + (1.0 - norm_alpha) * canvas_crop
+        canvas[ry:ry + rh, rx:rx + rw] = np.clip(blended, 0, 255).astype(np.uint8)
+        return canvas

@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Luxe Apparel - Virtual Try-On Test Store</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background: #0b0f19;
+      color: #f1f5f9;
+      line-height: 1.6;
+    }
+    header {
+      background: rgba(17, 24, 39, 0.8);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 18px 48px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .logo {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      background: linear-gradient(135deg, #a855f7, #6366f1);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .nav-links {
+      display: flex;
+      gap: 24px;
+      font-size: 14px;
+      color: #94a3b8;
+    }
+    .nav-links a {
+      color: inherit;
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover {
+      color: #ffffff;
+    }
+    .hero {
+      padding: 60px 48px 30px;
+      max-width: 1200px;
+      margin: 0 auto;
+      text-align: center;
+    }
+    .hero h1 {
+      font-size: 38px;
+      font-weight: 800;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, #ffffff, #cbd5e1);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      font-size: 16px;
+      color: #94a3b8;
+      max-width: 650px;
+      margin: 0 auto;
+    }
+    .notice-box {
+      margin: 24px auto 0;
+      padding: 12px 20px;
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      border-radius: 10px;
+      display: inline-block;
+      font-size: 13px;
+      color: #c7d2fe;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 0 48px 80px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 28px;
+    }
+    .card {
+      background: rgba(17, 24, 39, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      overflow: hidden;
+      transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+      display: flex;
+      flex-direction: column;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(99, 102, 241, 0.4);
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
+    }
+    .card-img-wrap {
+      position: relative;
+      width: 100%;
+      height: 320px;
+      overflow: hidden;
+      background: #1e293b;
+    }
+    .card-img-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transition: transform 0.35s ease;
+    }
+    .card:hover .card-img-wrap img {
+      transform: scale(1.05);
+    }
+    .badge {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(15, 23, 42, 0.8);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #f8fafc;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 8px;
+      border-radius: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .card-details {
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+    }
+    .card-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      color: #f8fafc;
+    }
+    .card-category {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 12px;
+    }
+    .card-price-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: auto;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .price {
+      font-size: 18px;
+      font-weight: 800;
+      color: #a5b4fc;
+    }
+    .btn {
+      background: #6366f1;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn:hover {
+      background: #4f46e5;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo">LUXE APPAREL</div>
+    <nav class="nav-links">
+      <a href="#">New In</a>
+      <a href="#">Outerwear</a>
+      <a href="#">Shirts</a>
+      <a href="#">Dresses</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h1>Autumn / Winter Studio Collection</h1>
+    <p>Test the <strong>Anywear VTO</strong> Chrome Extension garment picker on this page by clicking "Pick Garment" in the floating modal.</p>
+    <div class="notice-box">
+      ✨ <strong>Test Instructions:</strong> Click the "Pick Garment" button in the Anywear VTO overlay, then hover over any product image below and click it!
+    </div>
+  </section>
+
+  <main class="container">
+    <div class="grid">
+      <!-- Item 1 -->
+      <div class="card">
+        <div class="card-img-wrap">
+          <span class="badge">Trending</span>
+          <img 
+            src="https://images.unsplash.com/photo-1551028719-00167b16eac5?w=800&auto=format&fit=crop&q=80" 
+            data-zoom-image="https://images.unsplash.com/photo-1551028719-00167b16eac5?w=1600&auto=format&fit=crop&q=90"
+            alt="Vintage Leather Biker Jacket" 
+          />
+        </div>
+        <div class="card-details">
+          <h2 class="card-title">Vintage Biker Jacket</h2>
+          <span class="card-category">Outerwear / Leather</span>
+          <div class="card-price-row">
+            <span class="price">$289.00</span>
+            <button class="btn">View</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Item 2 -->
+      <div class="card">
+        <div class="card-img-wrap">
+          <span class="badge">New</span>
+          <img 
+            src="https://images.unsplash.com/photo-1576995853123-5a10305d93c0?w=800&auto=format&fit=crop&q=80" 
+            data-zoom-image="https://images.unsplash.com/photo-1576995853123-5a10305d93c0?w=1600&auto=format&fit=crop&q=90"
+            alt="Classic Denim Jacket" 
+          />
+        </div>
+        <div class="card-details">
+          <h2 class="card-title">Classic Denim Jacket</h2>
+          <span class="card-category">Casual Outerwear</span>
+          <div class="card-price-row">
+            <span class="price">$145.00</span>
+            <button class="btn">View</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Item 3 -->
+      <div class="card">
+        <div class="card-img-wrap">
+          <img 
+            src="https://images.unsplash.com/photo-1618354691373-d851c5c3a990?w=800&auto=format&fit=crop&q=80" 
+            data-zoom-image="https://images.unsplash.com/photo-1618354691373-d851c5c3a990?w=1600&auto=format&fit=crop&q=90"
+            alt="Minimalist Graphic Cotton Tee" 
+          />
+        </div>
+        <div class="card-details">
+          <h2 class="card-title">Minimalist Cotton Tee</h2>
+          <span class="card-category">T-Shirts / Organic Cotton</span>
+          <div class="card-price-row">
+            <span class="price">$45.00</span>
+            <button class="btn">View</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Item 4 -->
+      <div class="card">
+        <div class="card-img-wrap">
+          <span class="badge">Best Seller</span>
+          <img 
+            src="https://images.unsplash.com/photo-1596755094514-f87e34085b2c?w=800&auto=format&fit=crop&q=80" 
+            data-zoom-image="https://images.unsplash.com/photo-1596755094514-f87e34085b2c?w=1600&auto=format&fit=crop&q=90"
+            alt="Oxford Formal Linen Shirt" 
+          />
+        </div>
+        <div class="card-details">
+          <h2 class="card-title">Oxford Linen Shirt</h2>
+          <span class="card-category">Shirts / Relaxed Fit</span>
+          <div class="card-price-row">
+            <span class="price">$89.00</span>
+            <button class="btn">View</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Item 5 (Bottom / Jeans) -->
+      <div class="card">
+        <div class="card-img-wrap">
+          <span class="badge" style="background: rgba(236, 72, 153, 0.85);">Bottom</span>
+          <img 
+            src="https://images.unsplash.com/photo-1542272604-780c96856592?w=800&auto=format&fit=crop&q=80" 
+            data-zoom-image="https://images.unsplash.com/photo-1542272604-780c96856592?w=1600&auto=format&fit=crop&q=90"
+            alt="Classic Slim Fit Denim Jeans" 
+          />
+        </div>
+        <div class="card-details">
+          <h2 class="card-title">Slim Fit Denim Jeans</h2>
+          <span class="card-category">Bottoms / Denim</span>
+          <div class="card-price-row">
+            <span class="price">$119.00</span>
+            <button class="btn">View</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Item 6 (Bottom / Trousers) -->
+      <div class="card">
+        <div class="card-img-wrap">
+          <span class="badge" style="background: rgba(236, 72, 153, 0.85);">Bottom</span>
+          <img 
+            src="https://images.unsplash.com/photo-1624378439575-d8705ad7ae80?w=800&auto=format&fit=crop&q=80" 
+            data-zoom-image="https://images.unsplash.com/photo-1624378439575-d8705ad7ae80?w=1600&auto=format&fit=crop&q=90"
+            alt="Tailored Pleated Trousers" 
+          />
+        </div>
+        <div class="card-details">
+          <h2 class="card-title">Tailored Pleated Trousers</h2>
+          <span class="card-category">Bottoms / Chino Pants</span>
+          <div class="card-price-row">
+            <span class="price">$135.00</span>
+            <button class="btn">View</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+</body>
+</html>
