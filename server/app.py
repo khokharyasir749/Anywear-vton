@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from garment_processor import GarmentData, GarmentProcessor
 from pose_detector import PoseData, PoseDetector
 from vton_engine import VTONEngine
+from diffusion_engine import DiffusionVTONEngine
 
 # Configure structured logging
 logging.basicConfig(
@@ -49,6 +50,7 @@ app.add_middleware(
 
 executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="vton_worker")
 garment_processor = GarmentProcessor()
+diffusion_engine = DiffusionVTONEngine()
 
 
 class ClientSession:
@@ -246,6 +248,57 @@ def health_check():
     return {"status": "ok", "timestamp": time.time()}
 
 
+@app.get("/api/hardware")
+def get_hardware():
+    """Returns system GPU/CUDA status and active diffusion mode (Local CUDA vs Cloud Gradio CatVTON)."""
+    return diffusion_engine.get_status()
+
+
+@app.post("/api/tryon/neural")
+async def neural_tryon_endpoint(request_data: dict):
+    """
+    High-resolution photorealistic diffusion try-on endpoint (CatVTON / IDM-VTON).
+    Receives webcam human_image (base64 data URL), garment_url, and slot.
+    """
+    human_b64 = request_data.get("human_image")
+    garment_url = request_data.get("garment_url")
+    slot = request_data.get("slot", "TOP").upper()
+    category = "TOP" if slot == "TOP" else "BOTTOM"
+
+    if not human_b64:
+        return {"status": "error", "message": "human_image is required"}
+
+    human_bgr = diffusion_engine.decode_base64_to_bgr(human_b64)
+    if human_bgr is None:
+        return {"status": "error", "message": "Failed to decode human_image base64"}
+
+    garment_data = None
+    if garment_url:
+        garment_data = garment_processor.process_url(garment_url, category_override=category)
+
+    if garment_data is None:
+        return {"status": "error", "message": f"Failed to fetch or process garment: {garment_url}"}
+
+    loop = asyncio.get_running_loop()
+    result_bgr, metadata = await loop.run_in_executor(
+        executor,
+        diffusion_engine.generate_photorealistic_tryon,
+        human_bgr,
+        garment_data.image_bgra,
+        category
+    )
+
+    data_url = diffusion_engine.encode_bgr_to_base64_data_url(result_bgr)
+    return {
+        "status": "success",
+        "result_image": data_url,
+        "pipeline": metadata.get("pipeline", "Diffusion"),
+        "mode": metadata.get("mode", ""),
+        "latency_sec": metadata.get("latency_sec", 0.0),
+        "resolution": metadata.get("resolution", f"{human_bgr.shape[1]}x{human_bgr.shape[0]}")
+    }
+
+
 @app.websocket("/ws/stream")
 async def websocket_stream_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -401,6 +454,72 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                     elif event_type == "TOGGLE_MODE":
                         mode = payload.get("mode", "ai")
                         session.view_mode = mode
+
+                    elif event_type == "TRIGGER_NEURAL_TRYON":
+                        slot = payload.get("slot", "TOP").upper()
+                        human_b64 = payload.get("image_base64")
+                        cloth_url = payload.get("cloth_url")
+
+                        # Determine target garment
+                        target_garment = session.active_top if slot == "TOP" else session.active_bottom
+                        if target_garment is None and cloth_url:
+                            target_garment = garment_processor.process_url(cloth_url, category_override=slot)
+
+                        if target_garment is None:
+                            # Fallback: check if either slot is active
+                            target_garment = session.active_top or session.active_bottom
+
+                        if target_garment is None:
+                            await websocket.send_text(json.dumps({
+                                "type": "NEURAL_TRYON_RESULT",
+                                "status": "error",
+                                "message": "No active garment selected. Please click 'Pick Garment' first!"
+                            }))
+                            continue
+
+                        if not human_b64:
+                            await websocket.send_text(json.dumps({
+                                "type": "NEURAL_TRYON_RESULT",
+                                "status": "error",
+                                "message": "Webcam frame missing for diffusion try-on."
+                            }))
+                            continue
+
+                        await websocket.send_text(json.dumps({
+                            "type": "NEURAL_TRYON_PROGRESS",
+                            "status": "processing",
+                            "slot": target_garment.category,
+                            "message": f"Diffusing photorealistic try-on ({diffusion_engine.gradio_space})..."
+                        }))
+
+                        def _run_neural():
+                            h_bgr = diffusion_engine.decode_base64_to_bgr(human_b64)
+                            if h_bgr is None:
+                                return None, {"error": "Invalid frame decoding"}
+                            return diffusion_engine.generate_photorealistic_tryon(
+                                h_bgr,
+                                target_garment.image_bgra,
+                                target_garment.category
+                            )
+
+                        res_bgr, meta = await loop.run_in_executor(executor, _run_neural)
+                        if res_bgr is not None:
+                            res_data_url = diffusion_engine.encode_bgr_to_base64_data_url(res_bgr)
+                            await websocket.send_text(json.dumps({
+                                "type": "NEURAL_TRYON_RESULT",
+                                "status": "success",
+                                "slot": target_garment.category,
+                                "result_image": res_data_url,
+                                "pipeline": meta.get("pipeline", "Diffusion"),
+                                "latency_sec": meta.get("latency_sec", 0.0),
+                                "resolution": meta.get("resolution", "")
+                            }))
+                        else:
+                            await websocket.send_text(json.dumps({
+                                "type": "NEURAL_TRYON_RESULT",
+                                "status": "error",
+                                "message": meta.get("error", "Diffusion inference failed")
+                            }))
 
                 except json.JSONDecodeError:
                     logger.warning(f"Malformed JSON: {raw_text}")

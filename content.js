@@ -60,6 +60,8 @@
     activeBottomUrl: null,
     categoryMode: "AUTO", // "AUTO" | "TOP" | "BOTTOM"
     lightingIntensity: 0.85,
+    showingNeuralDiffusion: false,
+    neuralDiffusionImage: null,
     
     // WebSocket & Streaming
     wsUrl: "ws://localhost:8000/ws/stream",
@@ -714,6 +716,7 @@
     state.sentFrameTimestamps.clear();
 
     if (!elements.canvas) return;
+    if (state.showingNeuralDiffusion) return; // Keep neural diffusion HD image displayed on canvas
 
     // If no garments are selected and not in skeleton mesh mode, keep canvas clear so native 60 FPS video shines through!
     const hasGarments = !!(state.activeTopUrl || state.activeBottomUrl);
@@ -774,6 +777,28 @@
           updateSlotUi("BOTTOM", null, "No Bottom active", "Pick jeans or pants");
         }
       }
+      return;
+    }
+
+    if (data.type === "NEURAL_TRYON_PROGRESS") {
+      showToast(data.message || "Diffusing with CatVTON...", "info");
+      if (elements.diffusionLabel) {
+        elements.diffusionLabel.textContent = data.message || "Diffusing...";
+      }
+      return;
+    }
+
+    if (data.type === "NEURAL_TRYON_RESULT") {
+      resetDiffusionButton();
+      if (data.status === "success" && data.result_image) {
+        showToast(`Diffusion Complete! (${data.pipeline || "CatVTON"}, ${data.latency_sec}s)`, "info");
+        state.neuralDiffusionImage = data.result_image;
+        state.showingNeuralDiffusion = true;
+        renderNeuralDiffusionResult(data.result_image, data.pipeline);
+      } else {
+        showToast(data.message || "Diffusion try-on failed", "error");
+      }
+      return;
     }
   }
 
@@ -954,6 +979,18 @@
             <video id="vto-video" class="vto-video-element mirrored" autoplay playsinline muted></video>
             <canvas id="vton-render-canvas" class="vto-canvas-element"></canvas>
 
+            <!-- Neural Diffusion Result Banner Overlay (Hidden by default) -->
+            <div id="vto-diffusion-banner" class="vto-diffusion-banner" style="display:none;">
+              <div class="vto-diffusion-badge">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+                <span id="vto-diffusion-label">CatVTON HD Output</span>
+              </div>
+              <div class="vto-diffusion-actions">
+                <button id="vto-diff-toggle-btn" class="vto-diffusion-btn-small" title="Toggle Live Preview / HD Image">Live Stream</button>
+                <button id="vto-diff-dismiss-btn" class="vto-diffusion-btn-small" title="Dismiss HD Overlay">✕</button>
+              </div>
+            </div>
+
             <!-- Video HUD Telemetry -->
             <div class="vto-hud">
               <div class="vto-stat-pill">
@@ -1041,15 +1078,23 @@
           </div>
 
           <!-- Actions -->
-          <div class="vto-actions">
-            <button id="vto-pick-cloth-btn" class="vto-btn vto-btn-primary">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8M8 12h8"></path></svg>
-              Pick Garment
+          <div class="vto-actions" style="display:flex; flex-direction:column; gap:8px;">
+            <button id="vto-diffusion-btn" class="vto-btn vto-btn-diffusion" title="Neural Photorealistic Diffusion Try-On (CatVTON / IDM-VTON)">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/>
+              </svg>
+              <span>Neural Try-On (CatVTON)</span>
             </button>
-            <button id="vto-reconnect-btn" class="vto-btn vto-btn-secondary" title="Reconnect WebSocket">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-              Reconnect
-            </button>
+            <div style="display:flex; gap:8px; width:100%;">
+              <button id="vto-pick-cloth-btn" class="vto-btn vto-btn-primary">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8M8 12h8"></path></svg>
+                Pick Garment
+              </button>
+              <button id="vto-reconnect-btn" class="vto-btn vto-btn-secondary" title="Reconnect WebSocket">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Reconnect
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1114,7 +1159,12 @@
       mirrorBtn: shadowRoot.getElementById("vto-toggle-mirror"),
       minimizeBtn: shadowRoot.getElementById("vto-minimize-btn"),
       closeBtn: shadowRoot.getElementById("vto-close-btn"),
-      toast: shadowRoot.getElementById("vto-toast")
+      toast: shadowRoot.getElementById("vto-toast"),
+      diffusionBtn: shadowRoot.getElementById("vto-diffusion-btn"),
+      diffusionBanner: shadowRoot.getElementById("vto-diffusion-banner"),
+      diffusionLabel: shadowRoot.getElementById("vto-diffusion-label"),
+      diffToggleBtn: shadowRoot.getElementById("vto-diff-toggle-btn"),
+      diffDismissBtn: shadowRoot.getElementById("vto-diff-dismiss-btn")
     };
 
     // Attach Event Listeners
@@ -1132,6 +1182,16 @@
       setLightingIntensity(parseFloat(e.target.value) / 100.0);
     });
 
+    if (elements.diffusionBtn) {
+      elements.diffusionBtn.addEventListener("click", triggerNeuralTryOn);
+    }
+    if (elements.diffToggleBtn) {
+      elements.diffToggleBtn.addEventListener("click", toggleDiffusionView);
+    }
+    if (elements.diffDismissBtn) {
+      elements.diffDismissBtn.addEventListener("click", dismissDiffusionOverlay);
+    }
+
     elements.snapshotBtn.addEventListener("click", takeSnapshot);
     elements.reconnectBtn.addEventListener("click", () => {
       state.reconnectAttempts = 0;
@@ -1145,6 +1205,123 @@
 
     // Restore persisted settings from chrome.storage.local
     loadPersistedSettings();
+  }
+
+  // =========================================================================
+  // 8.1 Neural Diffusion Try-On Logic (CatVTON / IDM-VTON)
+  // =========================================================================
+  function resetDiffusionButton() {
+    if (!elements.diffusionBtn) return;
+    elements.diffusionBtn.classList.remove("loading");
+    elements.diffusionBtn.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/>
+      </svg>
+      <span>Neural Try-On (CatVTON)</span>
+    `;
+  }
+
+  function triggerNeuralTryOn() {
+    if (!state.isCameraRunning || !elements.video) {
+      showToast("Please turn on your camera first!", "error");
+      return;
+    }
+    const hasGarment = !!(state.activeTopUrl || state.activeBottomUrl || state.activeClothUrl);
+    if (!hasGarment) {
+      showToast("Please click 'Pick Garment' first to select clothes!", "error");
+      return;
+    }
+
+    if (!state.wsConnected) {
+      showToast("VTON Backend is offline. Reconnecting...", "error");
+      initWebSocket();
+      return;
+    }
+
+    // Capture crisp high-resolution video frame
+    const vWidth = elements.video.videoWidth || 640;
+    const vHeight = elements.video.videoHeight || 480;
+    const fullCanvas = document.createElement("canvas");
+    fullCanvas.width = vWidth;
+    fullCanvas.height = vHeight;
+    const ctx = fullCanvas.getContext("2d");
+
+    ctx.save();
+    if (state.isMirrored) {
+      ctx.translate(vWidth, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(elements.video, 0, 0, vWidth, vHeight);
+    ctx.restore();
+
+    const imageBase64 = fullCanvas.toDataURL("image/jpeg", 0.92);
+
+    if (elements.diffusionBtn) {
+      elements.diffusionBtn.classList.add("loading");
+      elements.diffusionBtn.innerHTML = `
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="animation: spin 1s linear infinite;"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round"/></svg>
+        <span>Diffusing (CatVTON)...</span>
+      `;
+    }
+
+    showToast("Launching CatVTON Neural Diffusion Pipeline...", "info");
+
+    sendWebSocketJson({
+      type: "TRIGGER_NEURAL_TRYON",
+      image_base64: imageBase64,
+      slot: state.categoryMode || "TOP",
+      cloth_url: state.activeTopUrl || state.activeBottomUrl || state.activeClothUrl,
+      timestamp: Date.now()
+    });
+  }
+
+  function renderNeuralDiffusionResult(dataUrl, pipelineName = "CatVTON") {
+    if (!elements.canvas) return;
+    const img = new Image();
+    img.onload = () => {
+      const ctx = elements.canvas.getContext("2d");
+      ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+      ctx.drawImage(img, 0, 0, elements.canvas.width, elements.canvas.height);
+
+      if (elements.diffusionBanner) {
+        elements.diffusionBanner.style.display = "flex";
+      }
+      if (elements.diffusionLabel) {
+        elements.diffusionLabel.textContent = `${pipelineName} HD Diffusion`;
+      }
+      if (elements.diffToggleBtn) {
+        elements.diffToggleBtn.textContent = "Live Stream";
+      }
+    };
+    img.src = dataUrl;
+  }
+
+  function toggleDiffusionView() {
+    if (!state.neuralDiffusionImage) return;
+    state.showingNeuralDiffusion = !state.showingNeuralDiffusion;
+    if (state.showingNeuralDiffusion) {
+      renderNeuralDiffusionResult(state.neuralDiffusionImage);
+      if (elements.diffToggleBtn) elements.diffToggleBtn.textContent = "Live Stream";
+    } else {
+      if (elements.diffToggleBtn) elements.diffToggleBtn.textContent = "Show HD";
+      if (elements.canvas) {
+        const ctx = elements.canvas.getContext("2d");
+        ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+      }
+    }
+  }
+
+  function dismissDiffusionOverlay() {
+    state.showingNeuralDiffusion = false;
+    state.neuralDiffusionImage = null;
+    if (elements.diffusionBanner) {
+      elements.diffusionBanner.style.display = "none";
+    }
+    if (elements.canvas) {
+      const ctx = elements.canvas.getContext("2d");
+      ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+    }
+    showToast("Resumed live 30 FPS preview", "info");
   }
 
   // =========================================================================

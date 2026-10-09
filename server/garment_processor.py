@@ -4,6 +4,7 @@ Automates garment isolation from e-commerce images (background removal, alpha ma
 classifies garment categories (TOP vs BOTTOM), and extracts geometric anchor control points.
 """
 
+import base64
 import hashlib
 import io
 import logging
@@ -58,23 +59,31 @@ class GarmentProcessor:
             return self.memory_cache[cache_key]
 
         try:
-            # 1. Download image
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                )
-            }
-            resp = requests.get(url, headers=headers, timeout=6)
-            if resp.status_code != 200:
-                logger.error(f"Failed to fetch garment image: HTTP {resp.status_code}")
-                return None
+            # 1. Load image (supports local file paths, base64 data URLs, and HTTP/HTTPS)
+            if os.path.exists(url):
+                img = cv2.imread(url, cv2.IMREAD_UNCHANGED)
+            elif url.startswith("data:image"):
+                base64_data = url.split(",", 1)[1] if "," in url else url
+                raw_bytes = base64.b64decode(base64_data)
+                img = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
+            else:
+                headers = {
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    )
+                }
+                resp = requests.get(url, headers=headers, timeout=6)
+                if resp.status_code != 200:
+                    logger.error(f"Failed to fetch garment image: HTTP {resp.status_code}")
+                    return None
 
-            image_bytes = np.asarray(bytearray(resp.content), dtype=np.uint8)
-            img = cv2.imdecode(image_bytes, cv2.IMREAD_UNCHANGED)
+                image_bytes = np.asarray(bytearray(resp.content), dtype=np.uint8)
+                img = cv2.imdecode(image_bytes, cv2.IMREAD_UNCHANGED)
+
             if img is None:
-                logger.error("Could not decode downloaded image bytes.")
+                logger.error("Could not decode garment image.")
                 return None
 
             # 2. Isolate garment and create 4-channel BGRA with alpha mask
