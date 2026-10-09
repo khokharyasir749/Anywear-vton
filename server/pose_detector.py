@@ -53,6 +53,7 @@ class PoseData:
     tilt_angle_deg: float = 0.0
     scale_factor: float = 1.0
     yaw_ratio: float = 0.0  # Body facing orientation (left vs right vs frontal)
+    segmentation_mask: Optional[np.ndarray] = None
 
 
 class PoseDetector:
@@ -94,7 +95,7 @@ class PoseDetector:
             base_options = python.BaseOptions(model_asset_path=model_path)
             options = vision.PoseLandmarkerOptions(
                 base_options=base_options,
-                output_segmentation_masks=False,
+                output_segmentation_masks=True,
                 min_pose_detection_confidence=self.min_detection_confidence,
                 min_tracking_confidence=self.min_tracking_confidence
             )
@@ -172,6 +173,7 @@ class PoseDetector:
         try:
             landmarks_list = None
 
+            seg_mask = None
             if self.api_type == "tasks":
                 # MediaPipe Tasks API
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -179,6 +181,11 @@ class PoseDetector:
                 results = self.landmarker.detect(mp_image)
                 if results and results.pose_landmarks and len(results.pose_landmarks) > 0:
                     landmarks_list = results.pose_landmarks[0]
+                    if getattr(results, "segmentation_masks", None) and len(results.segmentation_masks) > 0:
+                        try:
+                            seg_mask = results.segmentation_masks[0].numpy_view()
+                        except Exception:
+                            seg_mask = None
 
             elif self.api_type == "solutions":
                 # Legacy Solutions API
@@ -293,7 +300,8 @@ class PoseDetector:
                 hip_width=hip_width,
                 tilt_angle_deg=tilt_angle_deg,
                 scale_factor=scale_factor,
-                yaw_ratio=float(z_diff)
+                yaw_ratio=float(z_diff),
+                segmentation_mask=seg_mask
             )
             self._last_detect_time = now
             self._last_pose_result = result_data

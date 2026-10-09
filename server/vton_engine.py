@@ -129,8 +129,11 @@ class VTONEngine:
         pose: PoseData,
         top_garment: Optional[GarmentData] = None,
         bottom_garment: Optional[GarmentData] = None,
+        garment: Optional[GarmentData] = None,
         lighting_intensity: float = 0.85,
-        enable_physics: bool = True
+        enable_physics: bool = True,
+        lighting_adapt: bool = True,
+        **kwargs
     ) -> np.ndarray:
         """
         Renders active Top and/or active Bottom garments onto the user's frame
@@ -138,6 +141,14 @@ class VTONEngine:
         """
         if frame is None or not pose.detected:
             return frame
+
+        # Backward compatibility support for legacy single-garment parameter
+        if garment is not None:
+            if garment.category == "BOTTOM" and bottom_garment is None:
+                bottom_garment = garment
+            elif top_garment is None:
+                top_garment = garment
+
         if top_garment is None and bottom_garment is None:
             return frame
 
@@ -205,37 +216,74 @@ class VTONEngine:
         torso_len = max(1.0, math.hypot(pose.waist[0] - pose.neck[0], pose.waist[1] - pose.neck[1]))
         sh_len = max(1.0, pose.shoulder_width)
 
-        # 3. Inner Collar Hollow & Skin Neckline Occlusion (No Floating Hangers)
+        # 3. Inner Collar Hollow & Skin Neckline Occlusion (Snaps to neck contour)
         if garment.category == "TOP" and "collar_center" in dst_anchors:
             cc = dst_anchors["collar_center"]
             throat_x = int(cc[0])
-            throat_y = int(cc[1] - torso_len * 0.03)
-            c_rx = int(max(10, sh_len * 0.14))
-            c_ry = int(max(8, torso_len * 0.08))
+            throat_y = int(cc[1] - torso_len * 0.02)
+            c_rx = int(max(10, sh_len * 0.15))
+            c_ry = int(max(8, torso_len * 0.09))
 
             collar_cutout = np.zeros_like(warped_alpha)
             cv2.ellipse(collar_cutout, (throat_x, throat_y), (c_rx, c_ry), 0, 0, 360, 255, -1)
-            collar_cutout = cv2.GaussianBlur(collar_cutout, (9, 9), 0)
+            collar_cutout = cv2.GaussianBlur(collar_cutout, (7, 7), 0)
 
             # Punch out inner collar hole so user's natural throat and skin show through
             warped_alpha = np.clip(warped_alpha.astype(np.int16) - collar_cutout.astype(np.int16), 0, 255).astype(np.uint8)
 
-        # 4. Constrain to Body Segmentation Mask (ensures Tops don't spill to legs, Bottoms don't spill to chest)
+        # 4. Construct Dynamic Torso Replacement Mask (Complete Replacement, Not Flat Overlay)
+        # Binarize core garment region so virtual garment completely replaces user's clothing
+        garment_core = (warped_alpha > 35).astype(np.uint8) * 255
         if region_mask is not None:
-            norm_region = region_mask.astype(np.float32) / 255.0
-            warped_alpha = (warped_alpha.astype(np.float32) * norm_region).astype(np.uint8)
+            # Region mask isolates clothing area (with forearms, hands, and neck subtracted)
+            replacement_mask = cv2.bitwise_and(garment_core, region_mask)
+        else:
+            replacement_mask = garment_core
 
-        # 4. Realistic Depth Shading, Fabric Wrinkles & Ambient Occlusion
+        if np.max(replacement_mask) < 10:
+            return canvas_frame
+
+        # Feather boundary slightly so Poisson / Multi-Band blending transitions seamlessly
+        replacement_mask = cv2.GaussianBlur(replacement_mask, (5, 5), 0)
+
+        # 5. Realistic Depth Shading, Live Fabric Wrinkles & Ambient Occlusion
         shaded_bgr = self.depth_shading.apply_shading(
             warped_bgr=warped_bgr,
-            warped_alpha=warped_alpha,
+            warped_alpha=replacement_mask,
             original_frame=original_frame,
             pose=pose,
             intensity=lighting_intensity
         )
 
-        # 5. Bilateral Edge Feathering & Soft Alpha Compositing
-        return self._composite_feathered(canvas_frame, shaded_bgr, warped_alpha)
+        # 6. Foreground Chain / Necklace Detection (from original camera frame)
+        acc_mask = None
+        acc_roi = None
+        if garment.category == "TOP":
+            acc_mask, acc_roi = self.depth_shading.detect_foreground_accessories(
+                original_frame=original_frame,
+                pose=pose,
+                upper_torso_mask=replacement_mask
+            )
+
+        # 7. Decart-Level Seamless Live Blending (Poisson Gradient & Multi-Band Pyramid)
+        blended = self.depth_shading.seamless_poisson_blend(
+            original_frame=canvas_frame,
+            warped_garment_bgr=shaded_bgr,
+            replacement_mask=replacement_mask,
+            pose=pose,
+            mode="auto"
+        )
+
+        # 8. Foreground Chain / Necklace Preservation Re-Compositing
+        if acc_mask is not None and np.max(acc_mask) > 0:
+            blended = self.depth_shading.recomposite_foreground_accessories(
+                canvas=blended,
+                original_frame=original_frame,
+                accessory_mask=acc_mask,
+                roi_box=acc_roi
+            )
+
+        return blended
 
     def _compute_target_anchors(
         self,
@@ -296,23 +344,34 @@ class VTONEngine:
                 r_sh[1] + u_sh_y * (sh_len * 0.04) - down_y * (torso_len * 0.02)
             )
 
-            # 3. Sleeves & Armpits: follow user's upper arms
+            # 3. Sleeves & Armpits: follow user's upper arms scaled with arm thickness & angle
             l_elbow = pose.left_elbow if pose.left_elbow[0] > 0 else (l_sh[0] - sh_len * 0.35, l_sh[1] + torso_len * 0.5)
             r_elbow = pose.right_elbow if pose.right_elbow[0] > 0 else (r_sh[0] + sh_len * 0.35, r_sh[1] + torso_len * 0.5)
 
-            # Sleeve tips along arm vector
+            # Left arm direction and thickness
             l_arm_dx = l_elbow[0] - l_sh[0]
             l_arm_dy = l_elbow[1] - l_sh[1]
+            l_arm_len = max(1.0, math.hypot(l_arm_dx, l_arm_dy))
+            l_arm_ux = l_arm_dx / l_arm_len
+            l_arm_uy = l_arm_dy / l_arm_len
+
+            # Right arm direction and thickness
             r_arm_dx = r_elbow[0] - r_sh[0]
             r_arm_dy = r_elbow[1] - r_sh[1]
+            r_arm_len = max(1.0, math.hypot(r_arm_dx, r_arm_dy))
+            r_arm_ux = r_arm_dx / r_arm_len
+            r_arm_uy = r_arm_dy / r_arm_len
 
+            arm_thick = max(16.0, sh_len * 0.16)
+
+            # Sleeve tips along arm vector with lateral sleeve flare matching arm thickness
             dst["left_sleeve"] = (
-                l_sh[0] + l_arm_dx * 0.55 - u_sh_x * (sh_len * 0.05),
-                l_sh[1] + l_arm_dy * 0.55
+                l_sh[0] + l_arm_ux * min(l_arm_len * 0.58, torso_len * 0.45) - l_arm_uy * (arm_thick * 0.40),
+                l_sh[1] + l_arm_uy * min(l_arm_len * 0.58, torso_len * 0.45) + l_arm_ux * (arm_thick * 0.40)
             )
             dst["right_sleeve"] = (
-                r_sh[0] + r_arm_dx * 0.55 + u_sh_x * (sh_len * 0.05),
-                r_sh[1] + r_arm_dy * 0.55
+                r_sh[0] + r_arm_ux * min(r_arm_len * 0.58, torso_len * 0.45) + r_arm_uy * (arm_thick * 0.40),
+                r_sh[1] + r_arm_uy * min(r_arm_len * 0.58, torso_len * 0.45) - r_arm_ux * (arm_thick * 0.40)
             )
 
             # Underarm seams
