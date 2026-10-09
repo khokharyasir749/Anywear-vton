@@ -17,6 +17,35 @@
   window.__ANYWEAR_VTO_INITIALIZED__ = true;
 
   // =========================================================================
+  // Domain Exclusion & Privacy Guards
+  // =========================================================================
+  const EXCLUDED_HOSTS = [
+    "gemini.google.com",
+    "github.com",
+    "google.com",
+    "www.google.com",
+    "mail.google.com",
+    "drive.google.com",
+    "docs.google.com",
+    "stackoverflow.com",
+    "chatgpt.com",
+    "claude.ai"
+  ];
+
+  function isExcludedHost() {
+    try {
+      const host = (window.location.hostname || "").toLowerCase();
+      const protocol = window.location.protocol;
+      if (protocol === "chrome:" || protocol === "edge:" || protocol === "about:" || protocol === "chrome-extension:") {
+        return true;
+      }
+      return EXCLUDED_HOSTS.some(excluded => host === excluded || host.endsWith("." + excluded));
+    } catch {
+      return false;
+    }
+  }
+
+  // =========================================================================
   // State Management
   // =========================================================================
   const state = {
@@ -451,7 +480,43 @@
   // =========================================================================
   // 3. Webcam Media Stream & Zero-Lag Local Video
   // =========================================================================
+  function showCameraPermissionBanner(title = "Click to allow camera", description = "Click below to enable your camera for live try-on.") {
+    if (!elements.placeholder) return;
+    elements.placeholder.classList.remove("hidden");
+    elements.placeholder.innerHTML = `
+      <div class="vto-permission-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:18px 14px; gap:8px;">
+        <svg class="vto-placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:36px; height:36px; color:#818cf8; margin-bottom:2px;">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+          <circle cx="12" cy="13" r="4"></circle>
+        </svg>
+        <div style="font-size:13px; font-weight:600; color:#f8fafc;">${title}</div>
+        <div style="font-size:11px; color:#94a3b8; max-width:220px; line-height:1.4;">${description}</div>
+        <button id="vto-allow-cam-btn" class="vto-btn vto-btn-primary" style="margin-top:6px; padding:6px 14px; font-size:11px; font-weight:600; border-radius:7px; cursor:pointer;">
+          Turn on Camera
+        </button>
+      </div>
+    `;
+    const allowBtn = shadowRoot.getElementById("vto-allow-cam-btn");
+    if (allowBtn) {
+      allowBtn.addEventListener("click", () => {
+        startWebcam();
+      });
+    }
+  }
+
   async function startWebcam() {
+    if (isExcludedHost()) {
+      console.info("[Anywear VTO] Skipping webcam on excluded domain:", window.location.hostname);
+      showCameraPermissionBanner("Camera Standby", "Camera is disabled on this page.");
+      return;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.warn("[Anywear VTO] navigator.mediaDevices.getUserMedia unavailable in this context.");
+      showCameraPermissionBanner("Camera Not Supported", "Webcam access is unavailable in this browser frame.");
+      return;
+    }
+
     try {
       if (elements.placeholder) elements.placeholder.classList.add("hidden");
 
@@ -502,24 +567,16 @@
         startFrameStreamLoop();
       }
     } catch (err) {
-      console.error("[Anywear VTO] getUserMedia permission or device error:", err);
+      // Graceful fallback without unhandled red console.error
+      console.info("[Anywear VTO] Camera access paused or permission required:", err?.name || err?.message || err);
       state.isCameraRunning = false;
       state.isFrameInFlight = false;
       state.sentFrameTimestamps.clear();
-      if (elements.placeholder) {
-        elements.placeholder.classList.remove("hidden");
-        elements.placeholder.innerHTML = `
-          <svg class="vto-placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"></path>
-            <circle cx="12" cy="13" r="4"></circle>
-            <line x1="1" y1="1" x2="23" y2="23" stroke="#ef4444" stroke-width="2.5"></line>
-          </svg>
-          <div class="vto-placeholder-text">Camera Access Denied or Busy.<br/>Please enable webcam permission in Chrome address bar.</div>
-          <button id="vto-retry-cam-btn" class="vto-btn vto-btn-secondary" style="margin-top:6px; padding:4px 10px; font-size:11px;">Retry Camera</button>
-        `;
-        const retryBtn = shadowRoot.getElementById("vto-retry-cam-btn");
-        if (retryBtn) retryBtn.addEventListener("click", startWebcam);
+      if (elements.toggleCamBtn) {
+        elements.toggleCamBtn.classList.remove("active");
+        elements.toggleCamBtn.title = "Turn On Camera";
       }
+      showCameraPermissionBanner("Click to allow camera", "Camera permission is needed to stream real-time virtual try-on.");
     }
   }
 
@@ -543,7 +600,7 @@
       elements.toggleCamBtn.classList.remove("active");
       elements.toggleCamBtn.title = "Turn On Camera";
     }
-    if (elements.placeholder) elements.placeholder.classList.remove("hidden");
+    showCameraPermissionBanner("Camera Paused", "Click below to turn on the camera.");
   }
 
   function toggleWebcam() {
@@ -821,7 +878,7 @@
     if (elements.window) {
       elements.window.style.display = state.isOpen ? "flex" : "none";
     }
-    if (state.isOpen && !state.isCameraRunning) {
+    if (state.isOpen && !state.isCameraRunning && !isExcludedHost()) {
       startWebcam();
     }
   }
@@ -894,11 +951,17 @@
 
             <!-- Camera Permission Fallback -->
             <div id="vto-placeholder" class="vto-viewport-placeholder">
-              <svg class="vto-placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"></path>
-                <circle cx="12" cy="13" r="4"></circle>
-              </svg>
-              <div class="vto-placeholder-text">Requesting webcam access...</div>
+              <div class="vto-permission-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:18px 14px; gap:8px;">
+                <svg class="vto-placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:36px; height:36px; color:#818cf8; margin-bottom:2px;">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+                  <circle cx="12" cy="13" r="4"></circle>
+                </svg>
+                <div style="font-size:13px; font-weight:600; color:#f8fafc;">Click to allow camera</div>
+                <div style="font-size:11px; color:#94a3b8; max-width:220px; line-height:1.4;">Click below to enable your camera for live try-on.</div>
+                <button id="vto-allow-cam-btn" class="vto-btn vto-btn-primary" style="margin-top:6px; padding:6px 14px; font-size:11px; font-weight:600; border-radius:7px; cursor:pointer;">
+                  Turn on Camera
+                </button>
+              </div>
             </div>
           </div>
 
@@ -975,7 +1038,7 @@
             <button id="vto-snapshot-btn" class="vto-tool-icon-btn" title="Capture Try-On Photo">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
             </button>
-            <button id="vto-toggle-cam" class="vto-tool-icon-btn active" title="Toggle Webcam">
+            <button id="vto-toggle-cam" class="vto-tool-icon-btn" title="Turn On Camera">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 7l-7 5 7 5V7z"></path><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
             </button>
             <button id="vto-toggle-mirror" class="vto-tool-icon-btn active" title="Mirror Camera">
@@ -1208,11 +1271,30 @@
   // 13. Initialization Sequence
   // =========================================================================
   async function init() {
-    console.log("[Anywear VTO] Bootstrapping overlay and computer vision pipeline...");
+    console.log("[Anywear VTO] Initializing virtual try-on overlay...");
+    const excluded = isExcludedHost();
+    if (excluded) {
+      state.isOpen = false;
+    }
+
     initHostPickerOverlay();
     buildModalDom();
+
+    if (excluded && elements.window) {
+      elements.window.style.display = "none";
+    }
+
+    // Attach initial allow button click handler
+    const allowBtn = shadowRoot.getElementById("vto-allow-cam-btn");
+    if (allowBtn) {
+      allowBtn.addEventListener("click", () => startWebcam());
+    }
+
+    // Connect WebSocket stream backend in background
     initWebSocket();
-    await startWebcam();
+
+    // NOTE: startWebcam() is intentionally NOT called automatically here!
+    // It is only triggered when the user actually opens the widget or clicks "Turn on Camera".
   }
 
   // Wait for DOM to be interactive/complete

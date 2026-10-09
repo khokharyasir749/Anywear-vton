@@ -8,6 +8,34 @@
 
 const CONTEXT_MENU_ID = "anywear_vto_try_on";
 
+// Domains excluded from automatic script injection and webcam operations
+const EXCLUDED_HOSTS = [
+  "gemini.google.com",
+  "github.com",
+  "google.com",
+  "www.google.com",
+  "mail.google.com",
+  "drive.google.com",
+  "docs.google.com",
+  "stackoverflow.com",
+  "chatgpt.com",
+  "claude.ai"
+];
+
+function isExcludedUrl(url) {
+  if (!url) return true;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "chrome:" || parsed.protocol === "edge:" || parsed.protocol === "about:" || parsed.protocol === "chrome-extension:") {
+      return true;
+    }
+    const host = parsed.hostname.toLowerCase();
+    return EXCLUDED_HOSTS.some(excluded => host === excluded || host.endsWith("." + excluded));
+  } catch {
+    return true;
+  }
+}
+
 // Create Context Menu on install
 chrome.runtime.onInstalled.addListener(async () => {
   console.log("[Anywear VTO] Extension initialized / updated.");
@@ -20,11 +48,11 @@ chrome.runtime.onInstalled.addListener(async () => {
     });
   });
 
-  // Inject content scripts into already-open valid tabs on install/reload
+  // Inject content scripts into already-open valid tabs on install/reload (skipping excluded domains)
   try {
     const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*", "file://*/*"] });
     for (const tab of tabs) {
-      if (tab.id && !tab.url.startsWith("chrome://") && !tab.url.startsWith("edge://")) {
+      if (tab.id && !isExcludedUrl(tab.url)) {
         try {
           await chrome.scripting.executeScript({
             target: { tabId: tab.id },
