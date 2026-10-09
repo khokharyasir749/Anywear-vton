@@ -258,9 +258,6 @@
   function setGarment(url, title = "Garment Item") {
     state.activeClothUrl = url;
 
-  function setGarment(url, title = "Garment Item") {
-    state.activeClothUrl = url;
-
     // Send SET_CLOTH metadata event to backend over WebSocket with active slot mode
     sendWebSocketJson({
       type: "SET_CLOTH",
