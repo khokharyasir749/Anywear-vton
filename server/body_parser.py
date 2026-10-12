@@ -142,40 +142,49 @@ class BodyParser:
 
         sleeve_pad = sh_w * 0.28
 
-        # Define polygon coordinates for upper torso clothing region (covering entire shoulders, sleeves, and hem)
-        poly_pts = np.array([
-            [l_sh[0] - dx * sleeve_pad, l_sh[1] - dy * sleeve_pad - torso_h * 0.08], # Left outer shoulder
-            [neck[0] - down_x * (torso_h * 0.04), neck[1] - down_y * (torso_h * 0.04)], # Suprasternal notch
-            [r_sh[0] + dx * sleeve_pad, r_sh[1] + dy * sleeve_pad - torso_h * 0.08], # Right outer shoulder
-            [r_sh[0] + dx * (sleeve_pad * 1.35), r_sh[1] + torso_h * 0.52],         # Right sleeve
-            [r_sh[0] + dx * (sh_w * 0.12), waist[1] + torso_h * 0.15],              # Right waist hem
-            [waist[0] + down_x * (torso_h * 0.16), waist[1] + down_y * (torso_h * 0.16)], # Center hem
-            [l_sh[0] - dx * (sh_w * 0.12), waist[1] + torso_h * 0.15],              # Left waist hem
-            [l_sh[0] - dx * (sleeve_pad * 1.35), l_sh[1] + torso_h * 0.52],         # Left sleeve
-        ], dtype=np.int32)
+        # Collarbone / Clavicle anatomical landmarks
+        collar_left_base = (
+            l_sh[0] + dx * (sh_w * 0.22) - down_x * (torso_h * 0.02),
+            l_sh[1] + dy * (sh_w * 0.22) - down_y * (torso_h * 0.02)
+        )
+        collar_right_base = (
+            r_sh[0] - dx * (sh_w * 0.22) - down_x * (torso_h * 0.02),
+            r_sh[1] - dy * (sh_w * 0.22) - down_y * (torso_h * 0.02)
+        )
+        collar_center_notch = (
+            neck[0] + down_x * (torso_h * 0.03),
+            neck[1] + down_y * (torso_h * 0.03)
+        )
 
-        cv2.fillPoly(mask, [poly_pts], 255)
+        # Smooth Quadratic Bezier curve across collarbones (P0: left base -> P1: center dip -> P2: right base)
+        # Eliminates rigid straight-line polygon cuts and molds naturally to the human neckline
+        neck_curve_pts = []
+        for t in np.linspace(0.0, 1.0, 15):
+            bx = ((1.0 - t) ** 2) * collar_left_base[0] + 2.0 * (1.0 - t) * t * collar_center_notch[0] + (t ** 2) * collar_right_base[0]
+            by = ((1.0 - t) ** 2) * collar_left_base[1] + 2.0 * (1.0 - t) * t * collar_center_notch[1] + (t ** 2) * collar_right_base[1]
+            neck_curve_pts.append([int(bx), int(by)])
 
-        # If MediaPipe person segmentation mask is available, intersect with human silhouette
-        seg_mask = getattr(pose, "segmentation_mask", None)
-        if seg_mask is not None:
-            try:
-                if seg_mask.shape[:2] != (h, w):
-                    seg_resized = cv2.resize(seg_mask, (w, h), interpolation=cv2.INTER_LINEAR)
-                else:
-                    seg_resized = seg_mask
-                person_bin = (seg_resized > 0.25).astype(np.uint8) * 255
-                # Dilate person mask to prevent cutting shoulder/sleeve fabric
-                person_bin = cv2.dilate(person_bin, np.ones((15, 15), np.uint8))
-                mask = cv2.bitwise_and(mask, person_bin)
-            except Exception as e:
-                logger.debug("Could not intersect with pose segmentation: %s", e)
+        # Assemble full upper torso contour with smooth collarbone neckline
+        poly_pts = [
+            [int(l_sh[0] - dx * sleeve_pad), int(l_sh[1] - dy * sleeve_pad - torso_h * 0.06)] # Left outer shoulder
+        ]
+        poly_pts.extend(neck_curve_pts)
+        poly_pts.extend([
+            [int(r_sh[0] + dx * sleeve_pad), int(r_sh[1] + dy * sleeve_pad - torso_h * 0.06)], # Right outer shoulder
+            [int(r_sh[0] + dx * (sleeve_pad * 1.35)), int(r_sh[1] + torso_h * 0.52)],         # Right sleeve
+            [int(r_sh[0] + dx * (sh_w * 0.12)), int(waist[1] + torso_h * 0.15)],              # Right waist hem
+            [int(waist[0] + down_x * (torso_h * 0.16)), int(waist[1] + down_y * (torso_h * 0.16))], # Center hem
+            [int(l_sh[0] - dx * (sh_w * 0.12)), int(waist[1] + torso_h * 0.15)],              # Left waist hem
+            [int(l_sh[0] - dx * (sleeve_pad * 1.35)), int(l_sh[1] + torso_h * 0.52)],         # Left sleeve
+        ])
+
+        cv2.fillPoly(mask, [np.array(poly_pts, dtype=np.int32)], 255)
 
         # Subtract sensitive skin zones (chin, neck, forearms, hands)
         mask = cv2.subtract(mask, skin_preserve)
 
-        # Smooth edges slightly
-        return cv2.GaussianBlur(mask, (5, 5), 0)
+        # Smooth edges with 9px Gaussian feathering so mask perimeter melts naturally
+        return cv2.GaussianBlur(mask, (9, 9), 2.5)
 
     def _generate_lower_torso_mask(
         self, w: int, h: int, pose: PoseData, skin_preserve: np.ndarray

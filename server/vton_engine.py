@@ -282,21 +282,21 @@ class VTONEngine:
         torso_len = max(1.0, math.hypot(waist[0] - neck[0], waist[1] - neck[1]))
 
         if garment.category == "TOP":
-            # 1. Throat / Suprasternal notch:
-            # Collar center snaps directly to base of neck / throat (above shoulder line towards chin)
-            throat_x = neck[0] - down_x * (torso_len * 0.08)
-            throat_y = neck[1] - down_y * (torso_len * 0.08)
-            dst["collar_center"] = (throat_x, throat_y)
+            # 1. Clavicle & Collarbone Curvature:
+            # Anchor neckline smoothly to actual collarbone dip and clavicle slope
+            clavicle_dip_x = neck[0] + down_x * (torso_len * 0.02)
+            clavicle_dip_y = neck[1] + down_y * (torso_len * 0.02)
+            dst["collar_center"] = (clavicle_dip_x, clavicle_dip_y)
 
-            # Neckline scoop corners
-            collar_notch_w = sh_len * 0.16
+            # Neckline scoop corners along clavicle ridge towards shoulders
+            collar_notch_w = sh_len * 0.18
             dst["collar_left"] = (
-                throat_x - u_sh_x * collar_notch_w - down_x * (torso_len * 0.02),
-                throat_y - u_sh_y * collar_notch_w - down_y * (torso_len * 0.02)
+                clavicle_dip_x - u_sh_x * collar_notch_w - down_x * (torso_len * 0.03),
+                clavicle_dip_y - u_sh_y * collar_notch_w - down_y * (torso_len * 0.03)
             )
             dst["collar_right"] = (
-                throat_x + u_sh_x * collar_notch_w - down_x * (torso_len * 0.02),
-                throat_y + u_sh_y * collar_notch_w - down_y * (torso_len * 0.02)
+                clavicle_dip_x + u_sh_x * collar_notch_w - down_x * (torso_len * 0.03),
+                clavicle_dip_y + u_sh_y * collar_notch_w - down_y * (torso_len * 0.03)
             )
 
             # 2. Shoulder seams: snapped to anatomical landmarks 11 & 12 with realistic deltoid drape

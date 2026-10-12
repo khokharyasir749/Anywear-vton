@@ -71,9 +71,9 @@
     reconnectAttempts: 0,
     maxReconnectDelay: 8000,
     
-    // Video streaming parameters (Ultra-low latency hybrid decoupled stream)
-    targetFps: 12,
-    frameIntervalMs: 85, // Throttled for inference, while local video plays at 30-60 FPS
+    // Video streaming parameters (35+ FPS ultra-low latency real-time stream)
+    targetFps: 35,
+    frameIntervalMs: 28, // 35+ FPS streaming cadence (~28ms per frame)
     lastFrameSentAt: 0,
     isFrameInFlight: false,
     frameInFlightTime: 0,
@@ -888,8 +888,8 @@
     // IN-FLIGHT FRAME LOCK:
     // NEVER send a new frame if the previous frame has not yet returned from the server.
     if (state.isFrameInFlight) {
-      // Watchdog failsafe: if a frame is lost/dropped for >250ms, unlock so stream never stalls
-      if (Date.now() - state.frameInFlightTime > 250) {
+      // Watchdog failsafe: if a frame is delayed >50ms, unlock immediately so latency stays strictly <40-50ms
+      if (Date.now() - state.frameInFlightTime > 50) {
         state.isFrameInFlight = false;
         state.sentFrameTimestamps.clear();
       } else {
