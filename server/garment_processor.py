@@ -59,31 +59,107 @@ class GarmentProcessor:
             return self.memory_cache[cache_key]
 
         try:
-            # 1. Load image (supports local file paths, base64 data URLs, and HTTP/HTTPS)
-            if os.path.exists(url):
-                img = cv2.imread(url, cv2.IMREAD_UNCHANGED)
-            elif url.startswith("data:image"):
-                base64_data = url.split(",", 1)[1] if "," in url else url
-                raw_bytes = base64.b64decode(base64_data)
-                img = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
+            img = None
+            raw_bytes = None
+
+            # 1. Normalize protocol-relative URLs
+            if url.startswith("//"):
+                url = "https:" + url
+
+            # 2. Case A: Base64 data URL
+            if url.startswith("data:"):
+                try:
+                    base64_data = url.split(",", 1)[1] if "," in url else url
+                    import urllib.parse
+                    base64_data = urllib.parse.unquote(base64_data).strip()
+                    # Fix padding if needed
+                    padding = len(base64_data) % 4
+                    if padding:
+                        base64_data += "=" * (4 - padding)
+                    raw_bytes = base64.b64decode(base64_data)
+                    img = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
+                except Exception as b64_err:
+                    logger.warning(f"Error parsing base64 data URL: {b64_err}")
+
+            # 3. Case B: Local filesystem path (guard against Windows SMB network hangs on web URLs)
+            elif not url.startswith(("http://", "https://", "ftp://")):
+                if os.path.exists(url):
+                    img = cv2.imread(url, cv2.IMREAD_UNCHANGED)
+
+            # 4. Case C: Web HTTP/HTTPS URL
             else:
                 headers = {
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36"
-                    )
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "Referer": "https://www.daraz.pk/",
+                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
                 }
-                resp = requests.get(url, headers=headers, timeout=6)
-                if resp.status_code != 200:
-                    logger.error(f"Failed to fetch garment image: HTTP {resp.status_code}")
-                    return None
 
-                image_bytes = np.asarray(bytearray(resp.content), dtype=np.uint8)
-                img = cv2.imdecode(image_bytes, cv2.IMREAD_UNCHANGED)
+                # Fetch target URL
+                resp = None
+                try:
+                    resp = requests.get(url, headers=headers, timeout=8)
+                except Exception as req_err:
+                    logger.warning(f"Initial fetch failed for {url[:80]}: {req_err}")
+
+                # If failed or 404, check multiple CDN fallback variations
+                if resp is None or resp.status_code != 200 or len(resp.content) < 500:
+                    import re
+                    candidates = []
+                    # Fallback 1: Strip appended size & webp suffix to get base photo (e.g. .jpg_.webp -> .jpg)
+                    base_stripped = re.sub(r'(\.(?:jpg|jpeg|png|webp))_.*$', r'\1', url, flags=re.IGNORECASE)
+                    if base_stripped != url:
+                        candidates.append(base_stripped)
+                    # Fallback 2: Strip dimensions pattern
+                    dim_stripped = re.sub(r'_\d+x\d+[^.]*(\.[a-zA-Z0-9]+)', r'\1', url)
+                    dim_stripped = re.sub(r'_\.webp$', '', dim_stripped)
+                    if dim_stripped not in candidates and dim_stripped != url:
+                        candidates.append(dim_stripped)
+                    # Fallback 3: Lazada/Daraz standard 720x720 or 400x400
+                    if "lazcdn" in url or "daraz" in url or "alicdn" in url:
+                        c_720 = re.sub(r'_\d+x\d+[^.]*', '_720x720q80', url)
+                        if c_720 not in candidates and c_720 != url:
+                            candidates.append(c_720)
+
+                    for fb_url in candidates:
+                        try:
+                            logger.info(f"Retrying garment with fallback URL: {fb_url[:80]}")
+                            fb_resp = requests.get(fb_url, headers=headers, timeout=8)
+                            if fb_resp.status_code == 200 and len(fb_resp.content) > 500:
+                                resp = fb_resp
+                                break
+                        except Exception:
+                            pass
+
+                if resp is not None and resp.status_code == 200 and len(resp.content) > 200:
+                    raw_bytes = resp.content
+                    image_bytes = np.asarray(bytearray(raw_bytes), dtype=np.uint8)
+                    img = cv2.imdecode(image_bytes, cv2.IMREAD_UNCHANGED)
+                else:
+                    status_info = f"HTTP {resp.status_code}" if resp else "Connection error"
+                    logger.error(f"Failed to fetch garment image: {status_info} for {url[:90]}")
+
+            # 5. Pillow decode fallback if OpenCV returns None (handles WebP, AVIF, TIFF, progressive JPEG, etc.)
+            if img is None and raw_bytes is not None and len(raw_bytes) > 100:
+                try:
+                    from PIL import Image
+                    pil_img = Image.open(io.BytesIO(raw_bytes))
+                    if pil_img.mode in ("RGBA", "LA") or (pil_img.mode == "P" and "transparency" in pil_img.info):
+                        rgba = pil_img.convert("RGBA")
+                        img = cv2.cvtColor(np.array(rgba), cv2.COLOR_RGBA2BGRA)
+                    else:
+                        rgb = pil_img.convert("RGB")
+                        img = cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)
+                    logger.info(f"Decoded garment via Pillow fallback: {pil_img.format} {pil_img.size}")
+                except Exception as pil_err:
+                    logger.warning(f"Pillow decode fallback also failed: {pil_err}")
 
             if img is None:
-                logger.error("Could not decode garment image.")
+                logger.error(f"Could not decode garment image from URL: {url[:100]}")
                 return None
 
             # 2. Isolate garment and create 4-channel BGRA with alpha mask
@@ -125,7 +201,8 @@ class GarmentProcessor:
 
     def _isolate_garment(self, img: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Removes solid white/gray studio background and returns BGRA with alpha mask.
+        Removes solid white/gray/beige studio background and returns BGRA with alpha mask.
+        Supports multi-zone border sampling, perceptual CIELab distance, and morphological hole filling.
         """
         # Case A: Image already contains an alpha channel
         if len(img.shape) == 3 and img.shape[2] == 4:
@@ -143,31 +220,45 @@ class GarmentProcessor:
 
         h, w = bgr.shape[:2]
 
-        # Case B: E-Commerce white/studio background removal
-        # Sample the 4 corners to detect the ambient background color
-        corners = [
-            bgr[0:15, 0:15],
-            bgr[0:15, w-15:w],
-            bgr[h-15:h, 0:15],
-            bgr[h-15:h, w-15:w]
+        # Case B: Multi-zone border background sampling (handles white, light gray, beige, cream)
+        sw = max(6, int(w * 0.05))
+        sh = max(6, int(h * 0.05))
+        border_samples = [
+            bgr[0:sh, 0:sw],
+            bgr[0:sh, w - sw:w],
+            bgr[h - sh:h, 0:sw],
+            bgr[h - sh:h, w - sw:w],
+            bgr[0:sh, w // 2 - sw // 2:w // 2 + sw // 2],
+            bgr[h - sh:h, w // 2 - sw // 2:w // 2 + sw // 2],
+            bgr[h // 2 - sh // 2:h // 2 + sh // 2, 0:sw],
+            bgr[h // 2 - sh // 2:h // 2 + sh // 2, w - sw:w]
         ]
-        corner_means = [np.mean(c, axis=(0, 1)) for c in corners]
-        bg_color = np.median(corner_means, axis=0) # [B, G, R]
+        sample_means = [np.mean(s, axis=(0, 1)) for s in border_samples if s.size > 0]
+        bg_color = np.median(sample_means, axis=0) # [B, G, R]
 
-        # Calculate Euclidean color distance from background color
-        diff = np.linalg.norm(bgr.astype(np.float32) - bg_color.astype(np.float32), axis=2)
+        # Calculate Euclidean color distance in BGR
+        diff_bgr = np.linalg.norm(bgr.astype(np.float32) - bg_color.astype(np.float32), axis=2)
 
-        # Standard threshold: pixels close to background color become transparent
-        thresh_val = 26.0 if np.mean(bg_color) > 200 else 35.0
-        mask = (diff > thresh_val).astype(np.uint8) * 255
+        # Also calculate difference in CIELab for perceptual color separation (handles warm beige/cream studio bgs)
+        lab_img = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+        bg_lab = cv2.cvtColor(np.uint8([[bg_color]]), cv2.COLOR_BGR2LAB)[0, 0]
+        diff_lab = np.linalg.norm(lab_img.astype(np.float32) - bg_lab.astype(np.float32), axis=2)
+
+        thresh_val = 24.0 if np.mean(bg_color) > 190 else 32.0
+        mask = ((diff_bgr > thresh_val) | (diff_lab > 18.0)).astype(np.uint8) * 255
 
         # Morphological filtering to clean noise and fill small internal holes
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
+        # Fill all internal holes inside external contours so text/logos/prints on shirt are never hollowed out
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for c in contours:
+            cv2.drawContours(mask, [c], -1, 255, -1)
+
         # Smooth edges with slight feathering
-        mask = cv2.GaussianBlur(mask, (3, 3), 0)
+        mask = cv2.GaussianBlur(mask, (3, 3), 0.5)
 
         # Construct BGRA output
         bgra = cv2.cvtColor(bgr, cv2.COLOR_BGR2BGRA)
@@ -176,21 +267,61 @@ class GarmentProcessor:
         return bgra, mask
 
     def _auto_crop_garment(self, bgra: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Crops image tightly around the largest garment contour with a small safety margin."""
+        """
+        Crops image tightly around the primary single garment.
+        Disentangles multi-item catalog collages (e.g. Front + Back shirts displayed side-by-side)
+        to isolate ONLY the prominent single front garment!
+        """
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return bgra, mask
 
-        # Find largest contour
+        h, w = mask.shape[:2]
+
+        # Check for side-by-side dual-garment catalog collage (Front + Back)
+        # In e-commerce photos (Daraz, Amazon, etc.), front & back are shown side by side.
+        col_sum = np.sum(mask > 30, axis=0)
+        mid_min = int(w * 0.32)
+        mid_max = int(w * 0.68)
+
+        peak_left = np.max(col_sum[:mid_min]) if mid_min > 0 else 0
+        peak_right = np.max(col_sum[mid_max:]) if mid_max < w else 0
+
+        # If there are two strong vertical mass peaks on left and right with a valley in between
+        if peak_left > h * 0.25 and peak_right > h * 0.25:
+            min_mid_idx = mid_min + int(np.argmin(col_sum[mid_min:mid_max]))
+            valley_val = col_sum[min_mid_idx]
+            max_peak = max(peak_left, peak_right)
+
+            # Valley dip indicates two distinct garment objects (left = FRONT, right = BACK)
+            if valley_val < 0.82 * max_peak:
+                logger.info(
+                    f"Detected side-by-side dual garment collage. Splitting at x={min_mid_idx} to isolate FRONT garment."
+                )
+                isolated_mask = mask.copy()
+                isolated_mask[:, min_mid_idx:] = 0
+
+                left_contours, _ = cv2.findContours(isolated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if left_contours:
+                    chosen = max(left_contours, key=cv2.contourArea)
+                    x, y, cw, ch = cv2.boundingRect(chosen)
+                    pad = 6
+                    x1 = max(0, x - pad)
+                    y1 = max(0, y - pad)
+                    x2 = min(min_mid_idx, x + cw + pad)
+                    y2 = min(h, y + ch + pad)
+                    return bgra[y1:y2, x1:x2], mask[y1:y2, x1:x2]
+
+        # Standard single garment: take the largest primary contour
         largest = max(contours, key=cv2.contourArea)
-        x, y, w, h = cv2.boundingRect(largest)
+        x, y, cw, ch = cv2.boundingRect(largest)
 
         # Add 6px padding
         pad = 6
         x1 = max(0, x - pad)
         y1 = max(0, y - pad)
-        x2 = min(bgra.shape[1], x + w + pad)
-        y2 = min(bgra.shape[0], y + h + pad)
+        x2 = min(w, x + cw + pad)
+        y2 = min(h, y + ch + pad)
 
         return bgra[y1:y2, x1:x2], mask[y1:y2, x1:x2]
 

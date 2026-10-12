@@ -86,12 +86,13 @@ class BodyParser:
             0, 0, 360, 255, -1
         )
 
-        # 2. Neck oval / Collarbone contour
-        neck_x, neck_y = int(pose.neck[0]), int(pose.neck[1])
+        # 2. Neck skin preservation contour (strictly above the collar neckline, between chin and collarbone)
+        neck_x = int(pose.neck[0])
+        neck_center_y = int(pose.neck[1] - pose.torso_height * 0.09)
         cv2.ellipse(
             mask,
-            (neck_x, neck_y),
-            (int(pose.shoulder_width * 0.18), int(pose.torso_height * 0.15)),
+            (neck_x, neck_center_y),
+            (int(pose.shoulder_width * 0.15), int(pose.torso_height * 0.08)),
             0, 0, 360, 255, -1
         )
 
@@ -139,18 +140,18 @@ class BodyParser:
         if down_y < 0:
             down_x, down_y = -down_x, -down_y
 
-        sleeve_pad = sh_w * 0.18
+        sleeve_pad = sh_w * 0.28
 
-        # Define polygon coordinates for upper torso clothing region
+        # Define polygon coordinates for upper torso clothing region (covering entire shoulders, sleeves, and hem)
         poly_pts = np.array([
-            [l_sh[0] - dx * sleeve_pad, l_sh[1] - dy * sleeve_pad - torso_h * 0.05], # Left shoulder
+            [l_sh[0] - dx * sleeve_pad, l_sh[1] - dy * sleeve_pad - torso_h * 0.08], # Left outer shoulder
             [neck[0] - down_x * (torso_h * 0.04), neck[1] - down_y * (torso_h * 0.04)], # Suprasternal notch
-            [r_sh[0] + dx * sleeve_pad, r_sh[1] + dy * sleeve_pad - torso_h * 0.05], # Right shoulder
-            [r_sh[0] + dx * (sleeve_pad * 1.25), r_sh[1] + torso_h * 0.45],         # Right sleeve
-            [r_sh[0] + dx * (sh_w * 0.10), waist[1] + torso_h * 0.10],              # Right waist hem
-            [waist[0] + down_x * (torso_h * 0.12), waist[1] + down_y * (torso_h * 0.12)], # Center hem
-            [l_sh[0] - dx * (sh_w * 0.10), waist[1] + torso_h * 0.10],              # Left waist hem
-            [l_sh[0] - dx * (sleeve_pad * 1.25), l_sh[1] + torso_h * 0.45],         # Left sleeve
+            [r_sh[0] + dx * sleeve_pad, r_sh[1] + dy * sleeve_pad - torso_h * 0.08], # Right outer shoulder
+            [r_sh[0] + dx * (sleeve_pad * 1.35), r_sh[1] + torso_h * 0.52],         # Right sleeve
+            [r_sh[0] + dx * (sh_w * 0.12), waist[1] + torso_h * 0.15],              # Right waist hem
+            [waist[0] + down_x * (torso_h * 0.16), waist[1] + down_y * (torso_h * 0.16)], # Center hem
+            [l_sh[0] - dx * (sh_w * 0.12), waist[1] + torso_h * 0.15],              # Left waist hem
+            [l_sh[0] - dx * (sleeve_pad * 1.35), l_sh[1] + torso_h * 0.52],         # Left sleeve
         ], dtype=np.int32)
 
         cv2.fillPoly(mask, [poly_pts], 255)
@@ -163,9 +164,9 @@ class BodyParser:
                     seg_resized = cv2.resize(seg_mask, (w, h), interpolation=cv2.INTER_LINEAR)
                 else:
                     seg_resized = seg_mask
-                person_bin = (seg_resized > 0.35).astype(np.uint8) * 255
-                # Slightly dilate person mask to prevent edge clipping
-                person_bin = cv2.dilate(person_bin, np.ones((5, 5), np.uint8))
+                person_bin = (seg_resized > 0.25).astype(np.uint8) * 255
+                # Dilate person mask to prevent cutting shoulder/sleeve fabric
+                person_bin = cv2.dilate(person_bin, np.ones((15, 15), np.uint8))
                 mask = cv2.bitwise_and(mask, person_bin)
             except Exception as e:
                 logger.debug("Could not intersect with pose segmentation: %s", e)

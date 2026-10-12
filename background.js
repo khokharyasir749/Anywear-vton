@@ -132,3 +132,29 @@ function ensureAndSendMessage(tabId, message) {
     // Context invalidated or tab closed
   }
 }
+
+// Background cross-origin image proxy to convert product images to Base64 data URLs
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "FETCH_IMAGE_B64" && request.url) {
+    fetch(request.url)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.blob();
+      })
+      .then(blob => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          sendResponse({ success: true, dataUrl: reader.result });
+        };
+        reader.onerror = () => {
+          sendResponse({ success: false, error: "FileReader failed" });
+        };
+        reader.readAsDataURL(blob);
+      })
+      .catch(err => {
+        sendResponse({ success: false, error: err.message });
+      });
+    return true; // Keep asynchronous sendResponse channel open
+  }
+});
+

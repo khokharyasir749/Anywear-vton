@@ -212,13 +212,23 @@ class PoseDetector:
             r_hip_raw = landmarks_list[24]
 
             # Visibility check
-            vis_sum = getattr(l_sh_raw, 'visibility', 1.0) + \
-                      getattr(r_sh_raw, 'visibility', 1.0) + \
-                      getattr(l_hip_raw, 'visibility', 1.0) + \
-                      getattr(r_hip_raw, 'visibility', 1.0)
-            avg_vis = vis_sum / 4.0
+            l_sh_vis = getattr(l_sh_raw, 'visibility', 1.0)
+            r_sh_vis = getattr(r_sh_raw, 'visibility', 1.0)
+            l_hip_vis = getattr(l_hip_raw, 'visibility', 1.0)
+            r_hip_vis = getattr(r_hip_raw, 'visibility', 1.0)
 
-            if avg_vis < 0.40:
+            shoulder_vis = (l_sh_vis + r_sh_vis) * 0.5
+            hip_vis = (l_hip_vis + r_hip_vis) * 0.5
+            avg_vis = (shoulder_vis + hip_vis) * 0.5
+
+            # If shoulders aren't visible at all, pose cannot be detected
+            if shoulder_vis < 0.30:
+                return PoseData(detected=False, confidence=avg_vis)
+
+            # Close-up torso check (common in laptop/desktop webcams where user sits close to screen)
+            is_close_up_torso = (shoulder_vis >= 0.38 and (hip_vis < 0.40 or l_hip_raw.y > 0.88 or r_hip_raw.y > 0.88))
+
+            if not is_close_up_torso and avg_vis < 0.35:
                 return PoseData(detected=False, confidence=avg_vis)
 
             def to_px(lm):
@@ -252,8 +262,21 @@ class PoseDetector:
 
             # Neck = Midpoint between left & right shoulder
             neck = ((l_sh[0] + r_sh[0]) * 0.5, (l_sh[1] + r_sh[1]) * 0.5)
-            # Waist = Midpoint between left & right hip
-            waist = ((l_hip[0] + r_hip[0]) * 0.5, (l_hip[1] + r_hip[1]) * 0.5)
+
+            # In close-up torso framing (hips cut off by bottom of frame), extrapolate hips and waist
+            if is_close_up_torso:
+                sw = math.hypot(l_sh[0] - r_sh[0], l_sh[1] - r_sh[1])
+                torso_h = max(sw * 1.35, float(h) * 0.55)
+                waist_y = min(float(h) + 15.0, neck[1] + torso_h)
+                waist = (neck[0], waist_y)
+                l_hip = (l_sh[0] - 0.05 * sw, waist_y)
+                r_hip = (r_sh[0] + 0.05 * sw, waist_y)
+                smoothed["left_hip"] = l_hip
+                smoothed["right_hip"] = r_hip
+            else:
+                # Waist = Midpoint between left & right hip
+                waist = ((l_hip[0] + r_hip[0]) * 0.5, (l_hip[1] + r_hip[1]) * 0.5)
+
             # Chest = 30% from neck down towards waist
             chest = (
                 neck[0] + 0.30 * (waist[0] - neck[0]),

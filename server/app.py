@@ -378,13 +378,16 @@ async def websocket_stream_endpoint(websocket: WebSocket):
 
                     if event_type == "SET_CLOTH":
                         cloth_url = payload.get("cloth_url")
+                        cloth_b64 = payload.get("cloth_b64")
                         requested_slot = payload.get("slot", session.category_mode).upper() # "AUTO", "TOP", "BOTTOM"
 
-                        if cloth_url:
+                        target_source = cloth_b64 if (cloth_b64 and len(cloth_b64) > 50) else cloth_url
+
+                        if target_source:
                             # Process and isolate garment in background
                             def _fetch():
                                 cat = None if requested_slot == "AUTO" else requested_slot
-                                return garment_processor.process_url(cloth_url, category_override=cat)
+                                return garment_processor.process_url(target_source, category_override=cat)
 
                             garment_data = await loop.run_in_executor(executor, _fetch)
 
@@ -392,10 +395,10 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                                 assigned_category = garment_data.category
                                 if assigned_category == "TOP":
                                     session.active_top = garment_data
-                                    session.active_top_url = cloth_url
+                                    session.active_top_url = cloth_url or target_source[:40]
                                 else:
                                     session.active_bottom = garment_data
-                                    session.active_bottom_url = cloth_url
+                                    session.active_bottom_url = cloth_url or target_source[:40]
 
                                 await websocket.send_text(json.dumps({
                                     "type": "STATUS_ACK",
@@ -411,7 +414,8 @@ async def websocket_stream_endpoint(websocket: WebSocket):
                                 await websocket.send_text(json.dumps({
                                     "type": "STATUS_ACK",
                                     "action": "SET_CLOTH",
-                                    "status": "failed"
+                                    "status": "failed",
+                                    "assigned_slot": requested_slot
                                 }))
                         else:
                             # Clear all if URL is null
@@ -539,4 +543,4 @@ async def websocket_stream_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     logger.info("Starting Anywear VTO Step 3 Server on http://localhost:8000")
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False, log_level="info")
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True, log_level="info")

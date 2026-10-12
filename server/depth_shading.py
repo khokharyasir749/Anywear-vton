@@ -57,34 +57,32 @@ class DepthShadingEngine:
         alpha_roi = warped_alpha[ry:ry + rh, rx:rx + rw]
         frame_roi = original_frame[ry:ry + rh, rx:rx + rw]
 
-        # 1. Extract Live Real-World Folds & Wrinkles within ROI (Bidirectional float high-pass)
+        # 1. Extract Soft Macro Folds within ROI using Bilateral Filtering
+        # Removes high-frequency texture noise, stripes, zippers, and sensor grain while keeping soft physical folds
         gray_roi = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2GRAY)
-        low_pass = cv2.GaussianBlur(gray_roi, (17, 17), 0)
-        high_pass = gray_roi.astype(np.float32) - low_pass.astype(np.float32)
+        smoothed_gray = cv2.bilateralFilter(gray_roi, d=7, sigmaColor=45, sigmaSpace=7)
+        low_pass = cv2.GaussianBlur(smoothed_gray, (25, 25), 0)
+        high_pass = smoothed_gray.astype(np.float32) - low_pass.astype(np.float32)
 
-        # Normalized fold luminance centered at 0.5 (creases < 0.5, highlights > 0.5)
-        fold_norm = np.clip(0.5 + (high_pass / 128.0) * 0.85, 0.0, 1.0)
+        # Toned-down wrinkle strength (reduced from harsh 85% to subtle 22% clamped)
+        wrinkle_strength = 0.22 * intensity
+        fold_norm = np.clip(0.5 + (high_pass / 128.0) * wrinkle_strength, 0.40, 0.60)
         fold_3ch = fold_norm[:, :, np.newaxis]
 
-        # 2. Pegtop Soft-Light Blending + Multiply Shadow Transfer
+        # 2. Pegtop Soft-Light Blending (Clean luminance modulation without harsh shadow creases)
         cloth_norm = cloth_roi.astype(np.float32) / 255.0
         cloth_sq = cloth_norm * cloth_norm
         soft_light_roi = (1.0 - 2.0 * fold_3ch) * cloth_sq + (2.0 * fold_3ch) * cloth_norm
-
-        # Selective shadow multiply for deep creases
-        multiply_shadow = cloth_norm * np.clip(fold_3ch * 1.15, 0.0, 1.0)
-        deep_crease = (fold_3ch < 0.44).astype(np.float32)
-        blended_folds = (1.0 - deep_crease * 0.45) * soft_light_roi + (deep_crease * 0.45) * multiply_shadow
-        blended_folds_bgr = np.clip(blended_folds * 255.0, 0.0, 255.0)
+        blended_folds_bgr = np.clip(soft_light_roi * 255.0, 0.0, 255.0)
 
         # 3. Torso 3D Cylindrical Curvature & Underarm Ambient Occlusion
         shading_roi = self._compute_roi_diffuse_and_ao(rx, ry, rw, rh, pose)
         shading_3ch = shading_roi[:, :, np.newaxis]
 
-        # 4. Modulate Shading with user intensity
-        mix_factor = float(np.clip(intensity * 0.72, 0.0, 1.0))
+        # 4. Modulate Shading with gentle mix factor to preserve clean synthetic fabric colors
+        mix_factor = float(np.clip(intensity * 0.32, 0.0, 0.38))
         shaded_base = (1.0 - mix_factor) * cloth_roi.astype(np.float32) + mix_factor * blended_folds_bgr
-        ao_factor = (1.0 - intensity * 0.40) + (intensity * 0.40) * shading_3ch
+        ao_factor = (1.0 - intensity * 0.25) + (intensity * 0.25) * shading_3ch
         final_roi = np.clip(shaded_base * ao_factor, 0.0, 255.0).astype(np.uint8)
 
         # Write back shaded ROI to output buffer
@@ -191,19 +189,23 @@ class DepthShadingEngine:
         kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         filtered = cv2.morphologyEx(filtered, cv2.MORPH_CLOSE, kernel_close)
 
-        # 5. Connected components filter: retain structures hanging vertically from neck area
+        # 5. Connected components filter: retain only thin vertical structures hanging directly from throat
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(filtered, connectivity=8)
         accessory_roi = np.zeros_like(filtered)
 
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
-            # Accessories like chains & pendants are typically between 15 and 3500 pixels in this ROI
-            if 12 <= area <= 4000:
-                comp_y = stats[i, cv2.CC_STAT_TOP]
-                comp_h = stats[i, cv2.CC_STAT_HEIGHT]
-                # Keep components that extend down into the chest region
-                if comp_y + comp_h >= 10:
-                    accessory_roi[labels == i] = 255
+            comp_w = stats[i, cv2.CC_STAT_WIDTH]
+            comp_h = stats[i, cv2.CC_STAT_HEIGHT]
+            comp_y = stats[i, cv2.CC_STAT_TOP]
+
+            # Reject wide horizontal shirt stripes (which span across the chest with w >> h)
+            if comp_w > 45 and comp_w > comp_h * 1.8:
+                continue
+
+            # Real necklaces/chains hang vertically down from the throat area (comp_y <= 25, comp_h >= 15)
+            if 15 <= area <= 2500 and comp_h >= 15 and comp_y <= 25:
+                accessory_roi[labels == i] = 255
 
         if np.max(accessory_roi) == 0:
             return empty_mask, (x1, y1, x2, y2)
@@ -270,7 +272,8 @@ class DepthShadingEngine:
         so it looks physically present in the room without sticker artifacts.
 
         Modes:
-          - "auto" / "laplacian": Multi-band Laplacian pyramid blending (vibrant, artifact-free, 12ms)
+          - "auto": High-definition Bilateral Anti-Aliased Alpha Compositing (solid fabric, zero smog)
+          - "laplacian": Multi-band Laplacian pyramid blending
           - "poisson": cv2.seamlessClone Poisson gradient blending with automatic fallback
         """
         if replacement_mask is None or np.max(replacement_mask) < 10:
@@ -308,11 +311,21 @@ class DepthShadingEngine:
                     result[y1:y2, x1:x2] = cloned_roi
                     return result
             except Exception as e:
-                logger.debug("cv2.seamlessClone fallback to Laplacian blending: %s", e)
+                logger.debug("cv2.seamlessClone fallback: %s", e)
 
-        # Multi-band Laplacian pyramid blending (Default):
-        # Solves boundary gradients across octave bands without DC color-drift
-        blended_roi = self._laplacian_pyramid_blend(src_roi, dst_roi, mask_roi, levels=3)
+        # Multi-band Laplacian pyramid blending if explicitly requested
+        if mode == "laplacian":
+            blended_roi = self._laplacian_pyramid_blend(src_roi, dst_roi, mask_roi, levels=3)
+            result = original_frame.copy()
+            result[y1:y2, x1:x2] = blended_roi
+            return result
+
+        # High-definition Clean Anti-Aliased Alpha Compositing (Default "auto"):
+        # Garment core is 100% solid, crisp, and vibrant (user old clothes completely replaced!)
+        # Boundary edges have 2.5px smooth sub-pixel anti-aliasing with zero color smog or bleeding.
+        feathered_m = cv2.GaussianBlur(mask_roi, (3, 3), 0.8).astype(np.float32) / 255.0
+        m_3ch = feathered_m[:, :, np.newaxis]
+        blended_roi = (m_3ch * src_roi.astype(np.float32) + (1.0 - m_3ch) * dst_roi.astype(np.float32)).astype(np.uint8)
         result = original_frame.copy()
         result[y1:y2, x1:x2] = blended_roi
         return result

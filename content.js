@@ -278,9 +278,12 @@
   function enhanceCommerceImageUrl(url) {
     if (!url || typeof url !== "string") return url;
 
-    // 1. Daraz / Alibaba / AliExpress CDN: e.g. ..._100x100q80.jpg_.webp or _200x200.jpg
-    if (url.includes("alicdn.com") || url.includes("daraz") || url.includes("lazada")) {
-      url = url.replace(/_\d+x\d+[^.]*(\.[a-zA-Z0-9]+)/, "_800x800$1");
+    // 1. Daraz / Alibaba / AliExpress / Lazada CDN
+    if (url.includes("alicdn.com") || url.includes("daraz") || url.includes("lazada") || url.includes("slatic.net") || url.includes("lazcdn.com")) {
+      // If thumbnail is low-res (e.g. 100x100, 200x200), upgrade to 720x720 which Daraz CDN supports
+      if (/_(?:100x100|150x150|200x200|300x300)/i.test(url)) {
+        url = url.replace(/_\d+x\d+[^.]*(\.[a-zA-Z0-9]+)/, "_720x720$1");
+      }
       url = url.replace(/\.jpg_\.webp$/i, ".jpg").replace(/\.png_\.webp$/i, ".png");
     }
 
@@ -295,6 +298,49 @@
     }
 
     return url;
+  }
+
+  /**
+   * Extracts clean image payload as Base64 data URL directly from DOM element or background proxy.
+   * Guarantees python backend receives the exact image pixels even if external CDN blocks direct curl/requests.
+   */
+  function extractGarmentImagePayload(imgEl, url, callback) {
+    // 1. Try canvas extraction from DOM element
+    if (imgEl && imgEl.complete && imgEl.naturalWidth > 20) {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.min(800, imgEl.naturalWidth);
+        canvas.height = Math.round(canvas.width * (imgEl.naturalHeight / imgEl.naturalWidth));
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(imgEl, 0, 0, canvas.width, canvas.height);
+        const b64 = canvas.toDataURL("image/png");
+        if (b64 && b64.length > 200) {
+          callback(b64);
+          return;
+        }
+      } catch (corsErr) {
+        // Tainted canvas - fall through to background proxy
+      }
+    }
+
+    // 2. Background service worker fetch proxy with host_permissions
+    if (chrome.runtime?.sendMessage && url && !url.startsWith("data:")) {
+      try {
+        chrome.runtime.sendMessage({ action: "FETCH_IMAGE_B64", url }, (response) => {
+          if (chrome.runtime?.lastError || !response || !response.success) {
+            callback(null);
+          } else {
+            callback(response.dataUrl);
+          }
+        });
+        return;
+      } catch {
+        callback(null);
+        return;
+      }
+    }
+
+    callback(null);
   }
 
   /**
@@ -389,9 +435,18 @@
     const highResUrl = extractHighResImageUrl(imgEl);
     if (highResUrl) {
       const enhancedUrl = enhanceCommerceImageUrl(highResUrl);
+      const title = imgEl.alt || "Selected Garment";
       console.log("[Anywear VTO] Selected Garment URL:", enhancedUrl);
-      setGarment(enhancedUrl, imgEl.alt || "Selected Garment");
-      showToast("Garment selected! Fitting onto body...", "success");
+
+      // Pre-set slot preview immediately so user gets instant visual feedback
+      const targetSlot = state.categoryMode === "BOTTOM" ? "BOTTOM" : "TOP";
+      updateSlotUi(targetSlot, enhancedUrl, title, "Analyzing & Fitting...");
+      showToast("Garment selected! Fitting onto body...", "info");
+
+      // Extract image data directly from DOM / background proxy for 100% reliable processing
+      extractGarmentImagePayload(imgEl, enhancedUrl, (b64Data) => {
+        setGarment(enhancedUrl, title, b64Data);
+      });
     } else {
       showToast("Could not extract image URL from selected element.", "error");
     }
@@ -399,12 +454,12 @@
     toggleGarmentPicker(false);
   }
 
-  function setGarment(url, title = "Garment Item") {
+  function setGarment(url, title = "Garment Item", b64Data = null) {
     state.activeClothUrl = url;
 
     // Immediately display preview in active UI slot
     const targetSlot = state.categoryMode === "BOTTOM" ? "BOTTOM" : "TOP";
-    updateSlotUi(targetSlot, url, title, "Analyzing & Fitting...");
+    updateSlotUi(targetSlot, b64Data || url, title, "Analyzing & Fitting...");
 
     showToast(`Loading garment: ${title.slice(0, 24)}...`, "info");
 
@@ -412,6 +467,7 @@
     sendWebSocketJson({
       type: "SET_CLOTH",
       cloth_url: url,
+      cloth_b64: b64Data || (url && url.startsWith("data:") ? url : null),
       slot: state.categoryMode,
       title: title,
       timestamp: Date.now()
@@ -677,14 +733,14 @@
     if (!elements.placeholder) return;
     elements.placeholder.classList.remove("hidden");
     elements.placeholder.innerHTML = `
-      <div class="vto-permission-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:18px 14px; gap:8px;">
-        <svg class="vto-placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:36px; height:36px; color:#818cf8; margin-bottom:2px;">
+      <div class="vto-permission-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px 18px; gap:10px;">
+        <svg class="vto-placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:42px; height:42px; color:#818cf8; margin-bottom:4px;">
           <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
           <circle cx="12" cy="13" r="4"></circle>
         </svg>
-        <div style="font-size:13px; font-weight:600; color:#f8fafc;">${title}</div>
-        <div style="font-size:11px; color:#94a3b8; max-width:220px; line-height:1.4;">${description}</div>
-        <button id="vto-allow-cam-btn" class="vto-btn vto-btn-primary" style="margin-top:6px; padding:6px 14px; font-size:11px; font-weight:600; border-radius:7px; cursor:pointer;">
+        <div style="font-size:14px; font-weight:600; color:#f8fafc;">${title}</div>
+        <div style="font-size:12px; color:#94a3b8; max-width:260px; line-height:1.4;">${description}</div>
+        <button id="vto-allow-cam-btn" class="vto-btn vto-btn-primary" style="margin-top:8px; padding:8px 18px; font-size:12px; font-weight:600; border-radius:8px; cursor:pointer;">
           Turn on Camera
         </button>
       </div>
@@ -959,6 +1015,11 @@
             state.activeBottomUrl = data.bottom_url;
             updateSlotUi("BOTTOM", data.bottom_url, "Bottom Garment Active", "Legs Fitted");
           }
+          showToast(`Garment fitted cleanly! (${data.assigned_slot})`, "success");
+        } else if (data.status === "failed") {
+          const slot = data.assigned_slot || (state.categoryMode === "BOTTOM" ? "BOTTOM" : "TOP");
+          updateSlotUi(slot, null, "Fit Failed", "Try another shirt or drag & drop");
+          showToast("Could not process garment. Try another product photo or drag & drop!", "error");
         }
       } else if (data.action === "CLEAR_SLOT") {
         if (data.slot === "TOP" || data.slot === "ALL") {
@@ -1216,14 +1277,14 @@
 
             <!-- Camera Permission Fallback -->
             <div id="vto-placeholder" class="vto-viewport-placeholder">
-              <div class="vto-permission-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:18px 14px; gap:8px;">
-                <svg class="vto-placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:36px; height:36px; color:#818cf8; margin-bottom:2px;">
+              <div class="vto-permission-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px 18px; gap:10px;">
+                <svg class="vto-placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:42px; height:42px; color:#818cf8; margin-bottom:4px;">
                   <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
                   <circle cx="12" cy="13" r="4"></circle>
                 </svg>
-                <div style="font-size:13px; font-weight:600; color:#f8fafc;">Click to allow camera</div>
-                <div style="font-size:11px; color:#94a3b8; max-width:220px; line-height:1.4;">Click below to enable your camera for live try-on.</div>
-                <button id="vto-allow-cam-btn" class="vto-btn vto-btn-primary" style="margin-top:6px; padding:6px 14px; font-size:11px; font-weight:600; border-radius:7px; cursor:pointer;">
+                <div style="font-size:14px; font-weight:600; color:#f8fafc;">Click to allow camera</div>
+                <div style="font-size:12px; color:#94a3b8; max-width:260px; line-height:1.4;">Click below to enable your camera for live try-on.</div>
+                <button id="vto-allow-cam-btn" class="vto-btn vto-btn-primary" style="margin-top:8px; padding:8px 18px; font-size:12px; font-weight:600; border-radius:8px; cursor:pointer;">
                   Turn on Camera
                 </button>
               </div>
@@ -1254,7 +1315,7 @@
             <div class="vto-slot-card" id="vto-slot-top">
               <div class="vto-slot-badge top-badge">TOP</div>
               <div id="vto-top-thumb" class="vto-slot-thumb">
-                <svg class="vto-garment-thumb-placeholder" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <svg class="vto-garment-thumb-placeholder" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                   <path d="M20.38 3.46L16 2a4 4 0 01-8 0L3.62 3.46a2 2 0 00-1.34 2.23l.58 3.47a1 1 0 00.99.84H6v10c0 1.1.9 2 2 2h8a2 2 0 002-2V10h2.15a1 1 0 00.99-.84l.58-3.47a2 2 0 00-1.34-2.23z"/>
                 </svg>
               </div>
@@ -1269,7 +1330,7 @@
             <div class="vto-slot-card" id="vto-slot-bottom">
               <div class="vto-slot-badge bot-badge">BOTTOM</div>
               <div id="vto-bottom-thumb" class="vto-slot-thumb">
-                <svg class="vto-garment-thumb-placeholder" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <svg class="vto-garment-thumb-placeholder" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                   <path d="M6 3h12l1 7-2 11h-4l-1-9-1 9H7L5 10l1-7z"/>
                 </svg>
               </div>
@@ -1282,20 +1343,20 @@
           </div>
 
           <!-- Actions -->
-          <div class="vto-actions" style="display:flex; flex-direction:column; gap:8px;">
+          <div class="vto-actions" style="display:flex; flex-direction:column; gap:9px;">
             <button id="vto-diffusion-btn" class="vto-btn vto-btn-diffusion" title="Neural Photorealistic Diffusion Try-On (CatVTON / IDM-VTON)">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
                 <path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/>
               </svg>
               <span>Neural Try-On (CatVTON)</span>
             </button>
-            <div style="display:flex; gap:8px; width:100%;">
+            <div style="display:flex; gap:9px; width:100%;">
               <button id="vto-pick-cloth-btn" class="vto-btn vto-btn-primary">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8M8 12h8"></path></svg>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v8M8 12h8"></path></svg>
                 Pick Garment
               </button>
               <button id="vto-reconnect-btn" class="vto-btn vto-btn-secondary" title="Reconnect WebSocket">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
                 Reconnect
               </button>
             </div>
@@ -1662,7 +1723,8 @@
         "vto_lightingIntensity",
         "vto_categoryMode",
         "vto_isMirrored",
-        "vto_windowPos"
+        "vto_windowPos",
+        "vto_windowSize"
       ], (result) => {
         if (chrome.runtime?.lastError || !result) return;
 
@@ -1694,11 +1756,19 @@
             elements.window.style.right = "auto";
           }
         }
+
+        if (result.vto_windowSize && elements.window && !state.isMinimized) {
+          const { width, height } = result.vto_windowSize;
+          if (width && height) {
+            elements.window.style.width = width;
+            elements.window.style.height = height;
+          }
+        }
       });
     } catch {}
   }
 
-  // Save drag position on drag release
+  // Save drag position on drag release & save custom resize dimensions
   const originalMakeDraggable = makeElementDraggable;
   makeElementDraggable = function(dragHandle, targetWindow) {
     originalMakeDraggable(dragHandle, targetWindow);
@@ -1708,6 +1778,23 @@
         top: targetWindow.style.top
       });
     });
+
+    if (window.ResizeObserver && targetWindow) {
+      let resizeTimer = null;
+      const ro = new ResizeObserver(() => {
+        if (state.isMinimized) return;
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          if (targetWindow.offsetWidth >= 400 && targetWindow.offsetHeight >= 500) {
+            persistSetting("vto_windowSize", {
+              width: `${Math.round(targetWindow.offsetWidth)}px`,
+              height: `${Math.round(targetWindow.offsetHeight)}px`
+            });
+          }
+        }, 300);
+      });
+      ro.observe(targetWindow);
+    }
   };
 
   // =========================================================================
