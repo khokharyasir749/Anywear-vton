@@ -977,9 +977,12 @@
       const blob = new Blob([arrayBuffer], { type: "image/jpeg" });
       const imageBitmap = await createImageBitmap(blob);
 
-      const ctx = elements.canvas.getContext("2d");
-      ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
-      ctx.drawImage(imageBitmap, 0, 0, elements.canvas.width, elements.canvas.height);
+      requestAnimationFrame(() => {
+        if (!elements.canvas) return;
+        const ctx = elements.canvas.getContext("2d");
+        ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
+        ctx.drawImage(imageBitmap, 0, 0, elements.canvas.width, elements.canvas.height);
+      });
     } catch (err) {
       console.warn("[Anywear VTO] Error rendering server frame:", err);
     }

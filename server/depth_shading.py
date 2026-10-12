@@ -57,15 +57,29 @@ class DepthShadingEngine:
         alpha_roi = warped_alpha[ry:ry + rh, rx:rx + rw]
         frame_roi = original_frame[ry:ry + rh, rx:rx + rw]
 
-        # 1. Torso 3D Cylindrical Curvature & Subtle Underarm Ambient Occlusion
-        # Note: Aggressive high-pass wrinkle extraction is completely bypassed to eliminate horizontal
-        # wave ripple artifacts and restore 35+ FPS performance (saving 60-80ms per frame).
+        # 1. Natural Macro Folds & Torso Lighting Extraction from Camera Feed:
+        # Extracts ambient illumination, chin shadow, and natural body fold gradients
+        # while suppressing micro-stripes and fine graphic noise.
+        gray_roi = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2GRAY)
+        blurred_lum = cv2.GaussianBlur(gray_roi, (25, 25), 0).astype(np.float32)
+        mean_lum = float(np.mean(blurred_lum)) + 1e-4
+
+        # Normalized lighting ratio (centered around 1.0, clamped between 0.65 and 1.35)
+        lum_ratio = np.clip(blurred_lum / mean_lum, 0.65, 1.35)[:, :, np.newaxis]
+
+        # 2. Torso 3D Cylindrical Curvature & Underarm Ambient Occlusion
         shading_roi = self._compute_roi_diffuse_and_ao(rx, ry, rw, rh, pose)
         shading_3ch = shading_roi[:, :, np.newaxis]
 
-        # 2. Gentle Lighting Modulation: Preserve clean fabric color while providing natural anatomical volume
-        ao_factor = (1.0 - intensity * 0.22) + (intensity * 0.22) * shading_3ch
-        final_roi = np.clip(cloth_roi.astype(np.float32) * ao_factor, 0.0, 255.0).astype(np.uint8)
+        # 3. Soft Light / Multiply Blending:
+        # Seamlessly transfers real-world camera lighting and torso volume onto the virtual garment
+        cloth_float = cloth_roi.astype(np.float32)
+        fold_weight = float(np.clip(intensity * 0.35, 0.0, 0.50))
+        ambient_mult = (1.0 - fold_weight) + fold_weight * lum_ratio
+        ao_factor = (1.0 - intensity * 0.20) + (intensity * 0.20) * shading_3ch
+
+        shaded_cloth = cloth_float * ambient_mult * ao_factor
+        final_roi = np.clip(shaded_cloth, 0.0, 255.0).astype(np.uint8)
 
         # Write back shaded ROI to output buffer
         result_bgr = warped_bgr.copy()

@@ -158,8 +158,9 @@ class VTONEngine:
         # Update micro-draping fabric inertia
         drape_lag_x = self.physics.update(pose.neck[0]) if enable_physics else 0.0
 
-        # Extract body segment isolation masks
+        # Extract body segment preservation masks
         body_masks = self.body_parser.get_body_masks(frame, pose)
+        skin_occlusion = body_masks["skin_preserve"]
 
         # 1. Render BOTTOM Garment (Pants / Jeans) if active
         if bottom_garment is not None:
@@ -168,7 +169,7 @@ class VTONEngine:
                 original_frame=frame,
                 pose=pose,
                 garment=bottom_garment,
-                region_mask=body_masks["lower_torso"],
+                occlusion_mask=skin_occlusion,
                 lighting_intensity=lighting_intensity,
                 drape_lag_x=drape_lag_x * 0.4
             )
@@ -180,7 +181,7 @@ class VTONEngine:
                 original_frame=frame,
                 pose=pose,
                 garment=top_garment,
-                region_mask=body_masks["upper_torso"],
+                occlusion_mask=skin_occlusion,
                 lighting_intensity=lighting_intensity,
                 drape_lag_x=drape_lag_x
             )
@@ -193,44 +194,40 @@ class VTONEngine:
         original_frame: np.ndarray,
         pose: PoseData,
         garment: GarmentData,
-        region_mask: np.ndarray,
+        occlusion_mask: Optional[np.ndarray],
         lighting_intensity: float,
-        drape_lag_x: float
+        drape_lag_x: float,
+        **kwargs
     ) -> np.ndarray:
         """
-        Executes mesh warping, depth shading, fold transfer, and feathered blending
-        for a single garment against its isolated body region.
+        Executes multi-point Delaunay mesh warping, camera depth shading,
+        occlusion masking for chin/neck/hands, and soft feathered blending.
         """
         h, w = canvas_frame.shape[:2]
 
-        # 1. Compute target destination anchors on user's body
+        # 1. Compute target destination anchors on user's body with posture deformation
         dst_anchors = self._compute_target_anchors(pose, garment, w, h, drape_lag_x)
         if not dst_anchors:
             return canvas_frame
 
-        # 2. Piecewise Affine Mesh Warping across Delaunay topology
+        # 2. Multi-point Piecewise Affine Mesh Warping across Delaunay topology
         warped_bgr, warped_alpha = self._warp_mesh(garment, dst_anchors, w, h)
         if np.max(warped_alpha) < 10:
             return canvas_frame
 
-        torso_len = max(1.0, math.hypot(pose.waist[0] - pose.neck[0], pose.waist[1] - pose.neck[1]))
-        sh_len = max(1.0, pose.shoulder_width)
-
-        # 3. Construct Dynamic Torso Replacement Mask (Complete Replacement, Not Flat Overlay)
-        # Binarize core garment region so virtual garment completely replaces user's clothing
+        # 3. Natural Garment Silhouette & Front Occlusion Masking:
+        # Retain the garment's natural alpha contours (sleeves, collar, hems) rather than clipping with rigid polygons.
+        # Subtract user's neck, chin, and hands so they render naturally IN FRONT of the shirt!
         garment_core = (warped_alpha > 20).astype(np.uint8) * 255
-        if region_mask is not None and np.count_nonzero(region_mask) > 500:
-            # Region mask isolates clothing area (with forearms and hands preserved)
-            replacement_mask = cv2.bitwise_and(garment_core, region_mask)
-            if np.count_nonzero(replacement_mask) < 0.60 * np.count_nonzero(garment_core):
-                replacement_mask = garment_core
+        if occlusion_mask is not None and np.max(occlusion_mask) > 0:
+            replacement_mask = cv2.subtract(garment_core, occlusion_mask)
         else:
             replacement_mask = garment_core
 
         if np.max(replacement_mask) < 10:
             return canvas_frame
 
-        # 4. Realistic Depth Shading, Live Fabric Wrinkles & Ambient Occlusion
+        # 4. Realistic Depth Shading & Camera Fold/Light Transfer (Multiply / Soft Light)
         shaded_bgr = self.depth_shading.apply_shading(
             warped_bgr=warped_bgr,
             warped_alpha=replacement_mask,
@@ -239,7 +236,7 @@ class VTONEngine:
             intensity=lighting_intensity
         )
 
-        # 5. High-Definition Seamless Anti-Aliased Blending (Clean, Solid Fabric Replacement)
+        # 5. Seamless 7-11px Anti-Aliased Alpha Compositing
         blended = self.depth_shading.seamless_poisson_blend(
             original_frame=canvas_frame,
             warped_garment_bgr=shaded_bgr,
@@ -247,6 +244,11 @@ class VTONEngine:
             pose=pose,
             mode="auto"
         )
+
+        # 6. Re-composite foreground chin, neck, and hands so they sit cleanly on top
+        if occlusion_mask is not None and np.max(occlusion_mask) > 0:
+            occ_alpha = (cv2.GaussianBlur(occlusion_mask, (5, 5), 1.2).astype(np.float32) / 255.0)[:, :, np.newaxis]
+            blended = (occ_alpha * original_frame.astype(np.float32) + (1.0 - occ_alpha) * blended.astype(np.float32)).astype(np.uint8)
 
         return blended
 
@@ -350,19 +352,27 @@ class VTONEngine:
             )
 
             # 4. Chest & Ribs
-            dst["chest_center"] = (chest[0], chest[1])
+            # 4. Chest & Ribs with 3D Posture / Yaw Turning Deformation:
+            yaw_ratio = getattr(pose, "yaw_ratio", 0.0)
+            yaw_bias = float(np.clip(yaw_ratio * 0.40, -0.22, 0.22))
+            chest_shift_x = u_sh_x * (sh_len * yaw_bias * 0.5)
+            chest_shift_y = u_sh_y * (sh_len * yaw_bias * 0.5)
+
+            dst["chest_center"] = (chest[0] + chest_shift_x, chest[1] + chest_shift_y)
             rib_center = (
-                neck[0] + down_x * (torso_len * 0.58),
-                neck[1] + down_y * (torso_len * 0.58)
+                neck[0] + down_x * (torso_len * 0.58) + chest_shift_x * 0.6,
+                neck[1] + down_y * (torso_len * 0.58) + chest_shift_y * 0.6
             )
-            half_rib_w = sh_len * 0.48
+            # Perspective foreshortening: the side turning away contracts, front side expands naturally
+            half_rib_w_l = sh_len * max(0.25, 0.48 - yaw_bias * 0.35)
+            half_rib_w_r = sh_len * max(0.25, 0.48 + yaw_bias * 0.35)
             dst["left_rib"] = (
-                rib_center[0] - u_sh_x * half_rib_w + drape_lag_x * 0.4,
-                rib_center[1] - u_sh_y * half_rib_w
+                rib_center[0] - u_sh_x * half_rib_w_l + drape_lag_x * 0.4,
+                rib_center[1] - u_sh_y * half_rib_w_l
             )
             dst["right_rib"] = (
-                rib_center[0] + u_sh_x * half_rib_w + drape_lag_x * 0.4,
-                rib_center[1] + u_sh_y * half_rib_w
+                rib_center[0] + u_sh_x * half_rib_w_r + drape_lag_x * 0.4,
+                rib_center[1] + u_sh_y * half_rib_w_r
             )
             dst["left_mid"] = dst["left_rib"]
             dst["right_mid"] = dst["right_rib"]

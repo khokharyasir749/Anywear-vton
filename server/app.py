@@ -151,10 +151,7 @@ def process_video_frame_sync(
         elif session.view_mode == "skeleton" and pose.detected:
             frame = session.pose_detector.draw_skeleton(frame, pose)
 
-        # 4. Telemetry HUD Overlay
-        frame = draw_hud(frame, session, pose)
-
-        # 5. Ultra-fast JPEG Re-encoding (low compression overhead, skip 2-pass Huffman tree)
+        # 4. Ultra-fast JPEG Re-encoding (low compression overhead, skip 2-pass Huffman tree)
         encode_params = [
             int(cv2.IMWRITE_JPEG_QUALITY), 65,
             int(cv2.IMWRITE_JPEG_OPTIMIZE), 0
